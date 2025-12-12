@@ -5,6 +5,12 @@ import numpy as np
 import importlib
 from contextlib import redirect_stdout
 
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]  # implementations/ -> <ROOT>
+FILES_DIR = ROOT / "files"
+FILES_DIR.mkdir(parents=True, exist_ok=True)
+
 # function that selects the variable bitsize when generating C code
 def get_var_def_c(word_bitsize):   
     if word_bitsize <= 8: return 'uint8_t'
@@ -347,15 +353,43 @@ def test_implementation_c(cipher, cipher_name, input, output):
     args_np = [np.array(arg, dtype=dtype_np) for arg in input]
     result = np.zeros(len(output), dtype=dtype_np)
     output = np.array(output, dtype=dtype_np)
+    
+    # Build absolute paths
+    c_path = FILES_DIR / f"{cipher_name}.c"
+    out_path = FILES_DIR / f"{cipher_name}.out"
+    
+    compile_command = ["gcc", str(c_path), "-o", str(out_path)]
+    compile_process = subprocess.run(
+        compile_command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
 
-    compile_command = f"gcc files/{cipher_name}.c -o files/{cipher_name}.out"
-    compile_process = subprocess.run(compile_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # compile_command = f"gcc files/{cipher_name}.c -o files/{cipher_name}.out"
+    # compile_process = subprocess.run(compile_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # if compile_process.returncode != 0:
+    #     print(f"[ERROR] Compilation failed for {cipher_name}.c")
+    #     return False
+    
+    # compile_command = f"gcc files/{cipher_name}.c -o files/{cipher_name}.out"
+    # compile_process = subprocess.run(
+    # compile_command,
+    # shell=True,
+    # stdout=subprocess.PIPE,
+    # stderr=subprocess.PIPE,)
+
     if compile_process.returncode != 0:
         print(f"[ERROR] Compilation failed for {cipher_name}.c")
+        print("gcc stdout:")
+        print(compile_process.stdout.decode(errors="ignore"))
+        print("gcc stderr:")
+        print(compile_process.stderr.decode(errors="ignore"))
         return False
 
     try:
-        func = getattr(ctypes.CDLL(f"files/{cipher_name}.out"), cipher.name)
+        lib = ctypes.CDLL(str(out_path))
+        func = getattr(lib, cipher.name)
+        # func = getattr(ctypes.CDLL(f"files/{cipher_name}.out"), cipher.name)
         func.argtypes = [ctypes.POINTER(dtype_ct)] * (len(args_np) + 1)
         func_args = [arr.ctypes.data_as(ctypes.POINTER(dtype_ct)) for arr in args_np]
         func_args.append(result.ctypes.data_as(ctypes.POINTER(dtype_ct)))

@@ -144,6 +144,49 @@ class Equal(UnaryOperator):  # Operator assigning equality between the input var
             else: RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
         elif model_type == 'cp': RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
         else: raise Exception(str(self.__class__.__name__) + ": unknown model type '" + model_type + "'")
+        
+    def gen_autoguess_constr(self, *, algebraic=False):
+        """
+        Generate Autoguess-style constraints for Equal operation.
+        - If algebraic=False (default): emit connection relation "a, b"
+        - If algebraic=True:            emit algebraic relation "a + b"
+        
+        Supports:
+        - Single input to single output: a = b
+        - Multiple inputs to multiple outputs: generates pairwise equality constraints
+        """
+        
+        def _flatten(vars_):
+            for v in vars_:
+                if isinstance(v, (list, tuple)):
+                    for u in v:
+                        yield u
+                else:
+                    yield v
+        
+        try:
+            in_vars = [v.ID for v in _flatten(self.input_vars)]
+            out_vars = [v.ID for v in _flatten(self.output_vars)]
+            
+            if not in_vars or not out_vars:
+                return [f"# Equal {getattr(self, 'ID', '?')}: empty inputs or outputs"]
+            
+            # If dimensions match, generate pairwise equality constraints
+            if len(in_vars) == len(out_vars):
+                constraints = []
+                for a, b in zip(in_vars, out_vars):
+                    if algebraic:
+                        constraints.append(f"{a} + {b}")
+                    else:
+                        constraints.append(f"{a}, {b}")
+                return constraints
+            else:
+                return [f"# Equal {getattr(self, 'ID', '?')}: mismatched dimensions {len(in_vars)} inputs vs {len(out_vars)} outputs"]
+        
+        except AttributeError:
+            return [f"# Equal {getattr(self, 'ID', '?')}: missing input_vars or output_vars"]
+        except Exception:
+            return [f"# Error formatting Equal {getattr(self, 'ID', '?')}"]
 
 
 class Rot(UnaryOperator):     # Operator for the rotation function: rotation of the input variable to the output variable with "direction" ('l' or 'r') and "amount" of bits
