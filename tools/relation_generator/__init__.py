@@ -41,9 +41,13 @@ from . import relation_emitter
 from . import relation_cleaner
 
 
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
 def _ensure_temp_directory() -> Path:
     """Create the files/autoguess/temp directory if it doesn't exist."""
-    temp_dir = Path("files") / "autoguess" / "temp"
+    temp_dir = _project_root() / "files" / "autoguess" / "temp"
     temp_dir.mkdir(parents=True, exist_ok=True)
     return temp_dir
 
@@ -286,6 +290,8 @@ def generate_relations(
             if rounds is not None:
                 output_file += f"_{rounds}r"
             output_file += ".txt"
+    if output_file is not None and not Path(output_file).is_absolute():
+        output_file = str(_project_root() / output_file)
 
     # Step 5: Save dirty relations for debugging
     if save_dirty:
@@ -304,11 +310,11 @@ def generate_relations(
         clean_key_schedule_flag=use_key_schedule_cleaning
     )
 
-    # Get relative path from current working directory
+    # Get relative path from project root for stable output paths
     output_path = Path(output_file)
     if output_path.is_absolute():
         try:
-            rel_path = output_path.relative_to(Path.cwd())
+            rel_path = output_path.relative_to(_project_root())
         except ValueError:
             # If not relative to cwd, use absolute path
             rel_path = output_path

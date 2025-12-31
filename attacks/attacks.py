@@ -104,7 +104,6 @@ def gd_attack(cipher, known_vars=None, target_vars=None, solver="sat", maxguess=
     >>> known = [v.ID for v in func.vars[1][0]] + [v.ID for v in func.vars[2][4]]
     >>>
     >>> result = attacks.gd_attack(cipher, known_vars=known, solver='sat', maxguess=20)
-    >>> print(f"Attack complexity: 2^{result.num_guesses}")
     """
     time_start = time.time()
 

@@ -4,4 +4,8 @@
 *.pdf
 *.pyc
 files/*
+files/autoguess/
+temp/
+.pytest_cache/
+**/temp/
 .DS_Store

@@ -26,6 +26,10 @@ from tools.relation_generator import generate_relations
 from tools.autoguess import solve_autoguess
 
 
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
 @dataclass
 class AutoguessResult:
     """Container for Autoguess solver results."""
@@ -100,7 +104,10 @@ class AutoguessModel:
         self.cipher_or_function = cipher_or_function
         self.function_mode = function_mode
         self.function_type = function_type
-        self.output_dir = Path(output_dir)
+        output_path = Path(output_dir)
+        if not output_path.is_absolute():
+            output_path = _project_root() / output_path
+        self.output_dir = output_path
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.known_vars: Optional[List[str]] = None
