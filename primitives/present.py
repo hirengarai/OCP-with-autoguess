@@ -59,6 +59,8 @@ class PRESENT_block_cipher(Block_cipher):
                 sbox_mask_ks, sbox_index_ks, cons_mask_ks = ([1], [[0, 1, 2, 3]], [None]*60 + [True]*5)
             elif k_bitsize == 128:
                 sbox_mask_ks, sbox_index_ks, cons_mask_ks = ([1, 1], [[0, 1, 2, 3], [4, 5, 6, 7]], [None]*61 + [True]*5)
+                
+                
         super().__init__(name, p_input, k_input, c_output, nbr_rounds, nbr_rounds, [s_nbr_layers, s_nbr_words, s_nbr_temp_words, s_word_bitsize], [k_nbr_layers, k_nbr_words, k_nbr_temp_words, k_word_bitsize], [sk_nbr_layers, sk_nbr_words, sk_nbr_temp_words, sk_word_bitsize])
         self.test_vectors = self.gen_test_vectors(version)
 

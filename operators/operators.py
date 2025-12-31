@@ -244,6 +244,40 @@ class Rot(UnaryOperator):     # Operator for the rotation function: rotation of 
             else: RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
         elif model_type == 'cp': RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
         else: raise Exception(str(self.__class__.__name__) + ": unknown model type '" + model_type + "'")
+        
+    def gen_autoguess_constr(self):
+        """
+        Generate Autoguess-style constraints for Rotation operation.
+        Emits pairwise connection relations for bit-wise rotation.
+        
+        For rotation by r positions: input bit i maps to output bit (i+r) % n
+        Generates n constraints connecting each input bit to its rotated output bit.
+        """
+        
+        def _flatten(vars_):
+            for v in vars_:
+                if isinstance(v, (list, tuple)):
+                    yield from v
+                else:
+                    yield v
+        
+        try:
+            in_vars = [v.ID for v in _flatten(self.input_vars)]
+            out_vars = [v.ID for v in _flatten(self.output_vars)]
+            
+            if not in_vars or not out_vars:
+                return [f"# Rotation {getattr(self, 'ID', '?')}: empty inputs or outputs"]
+            
+            if len(in_vars) != len(out_vars):
+                return [f"# Rotation {getattr(self, 'ID', '?')}: mismatched dimensions {len(in_vars)} inputs vs {len(out_vars)} outputs"]
+            
+            # Generate pairwise rotation constraints
+            return [f"{in_bit}, {out_bit}" for in_bit, out_bit in zip(in_vars, out_vars)]
+        
+        except AttributeError:
+            return [f"# Rotation {getattr(self, 'ID', '?')}: missing input_vars or output_vars"]
+        except Exception:
+            return [f"# Error formatting Rotation {getattr(self, 'ID', '?')}"]
 
 
 class Shift(UnaryOperator):    # Operator for the shift function: shift of the input variable to the output variable with "direction" ('l' or 'r') and "amount" of bits
@@ -294,6 +328,73 @@ class Shift(UnaryOperator):    # Operator for the shift function: shift of the i
             else: RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
         elif model_type == 'cp': RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
         else: raise Exception(str(self.__class__.__name__) + ": unknown model type '" + model_type + "'")
+
+class ARADI_L32(Operator):
+    """
+    ARADI linear layer on a 32-bit word, operating on 16-bit halves internally.
+    Input:  x (32-bit)
+    Output: y (32-bit)
+    where y = join( L16(hi), L16(lo) ) with cross terms as per ARADI spec:
+      u' = u ^ ROTL16(u,a) ^ ROTL16(l,c)
+      l' = l ^ ROTL16(l,a) ^ ROTL16(u,b)
+      y  = (u'<<16) | l'
+    """
+    def __init__(self, input_vars, output_vars, a, b, c, ID=None):
+        super().__init__(input_vars, output_vars, ID=ID)
+        if len(input_vars) != 1 or len(output_vars) != 1:
+            raise Exception(f"{self.__class__.__name__}: expects 1 input and 1 output")
+        if input_vars[0].bitsize != 32 or output_vars[0].bitsize != 32:
+            raise Exception(f"{self.__class__.__name__}: input/output must be 32-bit")
+
+        self.a, self.b, self.c = a, b, c
+        
+    def generate_model(self, model_type='python'):
+        return super().generate_model(model_type)
+
+    def generate_implementation(self, implementation_type='python', unroll=False):
+        x  = self.get_var_ID('in', 0, unroll)
+        y  = self.get_var_ID('out', 0, unroll)
+        a, b, c = self.a, self.b, self.c
+
+        if implementation_type == 'python':
+            return [
+                f"u = ({x} >> 16) & 0xFFFF",
+                f"l = {x} & 0xFFFF",
+                f"ru = ((u << {a}) | (u >> (16-{a}))) & 0xFFFF",
+                f"rl = ((l << {a}) | (l >> (16-{a}))) & 0xFFFF",
+                f"rlc = ((l << {c}) | (l >> (16-{c}))) & 0xFFFF",
+                f"rub = ((u << {b}) | (u >> (16-{b}))) & 0xFFFF",
+                f"u2 = (u ^ ru ^ rlc) & 0xFFFF",
+                f"l2 = (l ^ rl ^ rub) & 0xFFFF",
+                f"{y} = ((u2 << 16) | l2) & 0xFFFFFFFF",
+            ]
+        elif implementation_type == 'c':
+            tag = self.ID if self.ID is not None else f"{x}_{y}"
+            # make it a safe C identifier
+            tag = ''.join(ch if ch.isalnum() else '_' for ch in str(tag))
+
+            up  = f"up_{tag}"
+            lp  = f"lp_{tag}"
+            ru  = f"ru_{tag}"
+            rl  = f"rl_{tag}"
+            rlc = f"rlc_{tag}"
+            rub = f"rub_{tag}"
+            u2  = f"u2_{tag}"
+            l2  = f"l2_{tag}"
+
+            return [
+                f"uint32_t {up} = ({x} >> 16) & 0xFFFFu;",
+                f"uint32_t {lp} = {x} & 0xFFFFu;",
+                f"uint32_t {ru}  = (({up} << {a}) | ({up} >> (16-{a}))) & 0xFFFFu;",
+                f"uint32_t {rl}  = (({lp} << {a}) | ({lp} >> (16-{a}))) & 0xFFFFu;",
+                f"uint32_t {rlc} = (({lp} << {c}) | ({lp} >> (16-{c}))) & 0xFFFFu;",
+                f"uint32_t {rub} = (({up} << {b}) | ({up} >> (16-{b}))) & 0xFFFFu;",
+                f"uint32_t {u2} = ({up} ^ {ru} ^ {rlc}) & 0xFFFFu;",
+                f"uint32_t {l2} = ({lp} ^ {rl} ^ {rub}) & 0xFFFFu;",
+                f"{y} = (({u2} << 16) | {l2});",
+            ]
+        else:
+            raise Exception(f"{self.__class__.__name__}: unknown implementation type '{implementation_type}'")
 
 
 class CustomOP(Operator):   # generic custom operator (to be defined by the user)

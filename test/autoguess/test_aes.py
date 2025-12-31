@@ -1,44 +1,43 @@
+"""
+Test Autoguess on AES
+"""
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]  # two levels up from test/autoguess/
-sys.path.insert(0, str(ROOT))
 
-FILES_DIR = ROOT / "files"
-FILES_DIR.mkdir(parents=True, exist_ok=True)
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
-import primitives.aes as aes
+# import variables.variables as var
 from variables.variables import Variable
-from attacks.autoguess import genAutoGuessRelations, solve
+import primitives.aes as aes
+from attacks import attacks
 
-# --- build the cipher ---
-nbr_rounds   = 1
-cipher_name  = "aes"
+# Build 1-round AES cipher
+nbr_rounds = 1
+cipher_name = "aes"
 aes_version = [128, 128]
 
-# Build cipher
-inp  = [Variable(8, ID=f"in{i}") for i in range(16)]
+inp = [Variable(8, ID=f"in{i}") for i in range(16)]
 outp = [Variable(8, ID=f"out{i}") for i in range(16)]
-key  = [Variable(8, ID=f"key{i}") for i in range(16)]
+key = [Variable(8, ID=f"key{i}") for i in range(16)]
 
 cipher = aes.AES_block_cipher(cipher_name, aes_version, inp, key, outp, nbr_rounds)
 
-# Known variables
+# Define known variables (input + output state)
 func = cipher.functions["PERMUTATION"]
-known_vars = [v.ID for v in func.vars[1][0]] + [v.ID for v in func.vars[func.nbr_rounds][func.nbr_layers]]
+known_vars = [v.ID for v in func.vars[1][0]] + \
+             [v.ID for v in func.vars[func.nbr_rounds][func.nbr_layers]]
 
-# Generate relations
-outfile = FILES_DIR / f"{cipher_name}_relations_{nbr_rounds}r.txt"
 
-genAutoGuessRelations(
+# Run attack using mid-level API (bypasses attacks.py)
+result = attacks.gd_attack(
     cipher,
-    filename=str(outfile),
-    rename_loose=True,
     known_vars=known_vars,
-    flat_sbox_mode=True,
-    clean_layers= True,
-    clean_key_schedule= True
+    solver='sat',
+    maxguess=6,
+    maxsteps=14,
+    relationfile=f"autoguess_relations_{cipher_name}_{nbr_rounds}r.txt",
+    outputfile=f"autoguess_output_{cipher_name}_{nbr_rounds}r"
 )
-
-# Solve
-solve(str(outfile), solver="sat", maxguess=6, maxsteps = 14)

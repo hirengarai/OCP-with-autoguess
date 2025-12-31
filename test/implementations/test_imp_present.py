@@ -79,7 +79,7 @@ def test_imp_present_blockcipher():
     PRESENT_BLOCKCIPHER_VERSIONS = [[64, 80], [64, 128]]
 
     for version in PRESENT_BLOCKCIPHER_VERSIONS:
-        cipher = PRESENT_BLOCKCIPHER(r=None, version=version)
+        cipher = PRESENT_BLOCKCIPHER(r=27, version=[64, 80])
 
         test_python_imp(cipher)
 

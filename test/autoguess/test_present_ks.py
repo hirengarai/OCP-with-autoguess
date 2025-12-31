@@ -1,33 +1,37 @@
+"""
+Test Autoguess on PRESENT Key Schedule
+"""
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]  # two levels up from test/autoguess/
-sys.path.insert(0, str(ROOT))
 
-FILES_DIR = ROOT / "files"
-FILES_DIR.mkdir(parents=True, exist_ok=True)
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
-import primitives.present as present
+# import variables.variables as var
 from variables.variables import Variable
-from attacks.autoguess import genAutoGuessRelationsForFunction, solve
+import primitives.present as present
+from attacks import attacks
 
-# --- build the cipher ---
-nbr_rounds   = 27
-cipher_name  = "present_keysch"
+
+# Build PRESENT cipher
+nbr_rounds = 27
+cipher_name = "PRESENT_KEYSCH"
+present_version = [64,80]
 
 inp  = [Variable(1, ID=f"in{i}")  for i in range(64)]
 outp = [Variable(1, ID=f"out{i}") for i in range(64)]
 key_var = [Variable(1, ID=f"key{i}") for i in range(80)]
 
-cipher = present.PRESENT_block_cipher(cipher_name,[64,80], inp, key_var, outp,nbr_rounds=nbr_rounds)
+cipher = present.PRESENT_block_cipher(cipher_name,present_version, inp, key_var, outp,nbr_rounds=nbr_rounds)
 
 KS = cipher.functions["KEY_SCHEDULE"]
 
 
-# --- known variables ---
+# Define known variables (input + output state)
 def ridx(r_paper):   # paper k_r,·  → code round index
     return r_paper + 1   # if your model is 1-based; change to `return r_paper` if not
-
 
 known_pairs = []
 
@@ -48,17 +52,18 @@ known_pairs += [(ridx(26), 2*i) for i in range(32)]
 # # Build the final known list (IDs)
 known_vars = [KS.vars[r][0][j].ID for (r, j) in known_pairs]
 
-# Generate relations
-outfile = FILES_DIR / f"{cipher_name}_relations_{nbr_rounds}r.txt"
+relationfile = f"relations_{cipher_name}_{nbr_rounds}r.txt"
+outputfile = f"output_{cipher_name}_{nbr_rounds}r.txt"
 
-genAutoGuessRelationsForFunction(
+# Run Autoguess
+result = attacks.gd_attack(
     KS,
-    filename= str(outfile),
     target_vars=known_vars,
-    flat_sbox_mode= False,
-    algebraic=True,
-    clean_layers= True
-    
+    solver='cp',
+    preprocess = 1,
+    flat_sbox_mode = False,
+    maxguess=60,
+    maxsteps=10,
+    relationfile=relationfile,
+    outputfile=outputfile
 )
-
-solve(str(outfile), solver="cp", preprocess=1, D=2, maxguess=60, maxsteps = 10)
