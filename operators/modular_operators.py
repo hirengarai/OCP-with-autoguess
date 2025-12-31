@@ -207,6 +207,43 @@ class ModAdd(BinaryOperator): # Operator for the modular addition: add the two i
                 RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
         elif model_type == 'cp': RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
         else: raise Exception(str(self.__class__.__name__) + ": unknown model type '" + model_type + "'")
+        
+    def gen_autoguess_constr(self):
+        """
+        Generate Autoguess-style constraints for Modulo Addition operation.
+        Emits connection relation "a, b, c" indicating a + b = c (mod 2^n).
+        
+        Supports:
+        - Standard 2-input modular addition: a + b = c (mod 2^n)
+        - Multi-input modular addition: a + b + d + ... = c (mod 2^n)
+        """
+        
+        def _flatten(vars_):
+            for v in vars_:
+                if isinstance(v, (list, tuple)):
+                    for u in v:
+                        yield u
+                else:
+                    yield v
+        
+        try:
+            in_vars = [v.ID for v in _flatten(self.input_vars)]
+            out_vars = [v.ID for v in _flatten(self.output_vars)]
+            
+            if not in_vars or not out_vars:
+                return [f"# ModAdd {getattr(self, 'ID', '?')}: empty inputs or outputs"]
+            
+            if len(out_vars) != 1:
+                return [f"# ModAdd {getattr(self, 'ID', '?')}: expected 1 output, got {len(out_vars)}"]
+            
+            # Generate constraint: all inputs and output
+            all_vars = in_vars + out_vars
+            return [", ".join(all_vars)]
+        
+        except AttributeError:
+            return [f"# ModAdd {getattr(self, 'ID', '?')}: missing input_vars or output_vars"]
+        except Exception:
+            return [f"# Error formatting ModAdd {getattr(self, 'ID', '?')}"]
 
 
 class ModMul(BinaryOperator):  # Operator for the modular multiplication: multiply the two input variables together towards the output variable

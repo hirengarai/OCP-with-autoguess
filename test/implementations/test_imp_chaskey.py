@@ -3,7 +3,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]  # this file -> implementation -> test -> <ROOT>
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from primitives.ascon import ASCON_PERMUTATION
+from primitives.chaskey import CHASKEY_PERMUTATION
 import implementations.implementations as imp
 import visualisations.visualisations as vis
 
@@ -57,31 +57,27 @@ def test_visualisation(cipher): # Generate visualisation figure
     vis.generate_figure(cipher, FILES_DIR / f"{cipher.name}.pdf")
 
 
-def test_imp_ascon_permutation():
-    rounds = [1]
+def test_imp_siphash_permutation():
+    cipher = CHASKEY_PERMUTATION(r=12)
 
-    for r in rounds:
-        print(f"\nTesting ASCON permutation with {r} rounds:")
-        cipher = ASCON_PERMUTATION(r=r)
+    test_python_imp(cipher)
 
-        test_python_imp(cipher)
+    test_python_unrolled_imp(cipher)
 
-        test_python_unrolled_imp(cipher)
+    test_c_imp(cipher)
 
-        test_c_imp(cipher)
+    test_c_unrolled_imp(cipher)
 
-        test_c_unrolled_imp(cipher)
+    # test_verilog_imp(cipher) # TO DO
 
-        # test_verilog_imp(cipher) # TO DO
+    # test_verilog_unrolled_imp(cipher) # TO DO
 
-        # test_verilog_unrolled_imp(cipher) # TO DO
-
-        test_visualisation(cipher)
+    test_visualisation(cipher)
 
 
 if __name__ == "__main__":
     print(f"=== Implementation Test Log ===")
 
-    test_imp_ascon_permutation()
+    test_imp_siphash_permutation()
 
-    print("All implementation tests completed!")
+    print("All implementation tests completed!")    

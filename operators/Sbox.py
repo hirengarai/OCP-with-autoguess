@@ -557,6 +557,72 @@ class Sbox(UnaryOperator):  # Generic operator assigning a Sbox relationship bet
             objective_fun = " + ".join(f"{w:.4f} {v}" for w, v in zip(weights, pr_variables))
             return pr_variables, objective_fun
         return [], ""
+    
+    def gen_autoguess_constr(self, *, flat_sbox_mode = True, non_square_strategy="bidirectional"):
+        """
+        Generate AutoGuess constraints for S-boxes (supports all shapes including non-square).
+        
+        Args:
+            flat_sbox_mode: If True, emit one rename line; else emit implication lines
+            non_square_strategy: Strategy for non-square S-boxes
+                - "bidirectional": Generate implications in both directions (default)
+                - "forward_only": Only generate input => output implications
+                - "backward_only": Only generate output => input implications
+                - "adaptive": Use forward for n_in < n_out, backward for n_in > n_out
+        """
+    
+        def _flatten(vars_):
+            for v in vars_:
+                if isinstance(v, (list, tuple)):
+                    for u in v:
+                        yield u
+                else:
+                    yield v
+
+        in_vars  = [v.ID for v in _flatten(self.input_vars)]
+        out_vars = [v.ID for v in _flatten(self.output_vars)]
+        n_in, n_out = len(in_vars), len(out_vars)
+
+        # Flat mode: works for any shape
+        if flat_sbox_mode:
+            return [f"{', '.join(in_vars)}, {', '.join(out_vars)}"]
+
+        # Implication mode: now supports all shapes
+        rels = []
+        ante = ", ".join(in_vars)
+        cons = ", ".join(out_vars)
+        
+        # Determine which implications to generate
+        generate_forward = False
+        generate_backward = False
+        
+        if non_square_strategy == "bidirectional":
+            generate_forward = True
+            generate_backward = True
+        elif non_square_strategy == "forward_only":
+            generate_forward = True
+        elif non_square_strategy == "backward_only":
+            generate_backward = True
+        elif non_square_strategy == "adaptive":
+            if n_in <= n_out:
+                generate_forward = True
+            if n_out <= n_in:
+                generate_backward = True
+        
+        # Generate forward implications: all inputs => each output
+        if generate_forward and n_in >= 1 and n_out >= 1:
+            for y in out_vars:
+                rels.append(f"{ante} => {y}")
+        
+        # Generate backward implications: all outputs => each input
+        if generate_backward and n_out >= 1 and n_in >= 1:
+            for x in in_vars:
+                rels.append(f"{cons} => {x}")
+        
+        if not rels:
+            return [f"# Sbox {getattr(self, 'ID', '?')}: no constraints generated, unsupported shape for {n_in}x{n_out}"]
+        
+        return rels
 
 
 # ---------------- Cipher Sbox ---------------- #

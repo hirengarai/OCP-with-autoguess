@@ -75,7 +75,7 @@ def test_imp_aes_blockcipher():
     AES_BLOCKCIPHER_VERSIONS = [[128, 128], [128, 192], [128, 256]]
 
     for version in AES_BLOCKCIPHER_VERSIONS:
-        cipher = AES_BLOCKCIPHER(r=None, version=version)
+        cipher = AES_BLOCKCIPHER(r=1, version=[128,128])
 
         test_python_imp(cipher)
 

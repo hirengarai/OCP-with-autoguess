@@ -1,5 +1,6 @@
 import numpy as np
 import copy
+import itertools
 from operators.operators import Operator, UnaryOperator, Equal, RaiseExceptionVersionNotExisting
 from operators.boolean_operators import XOR, N_XOR
 
@@ -307,6 +308,62 @@ class Matrix(Operator):   # Operator of the Matrix multiplication: appplies the 
             else:  RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
         elif model_type == 'cp': RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
         else: raise Exception(str(self.__class__.__name__) + ": unknown model type '" + model_type + "'")
+        
+    def gen_autoguess_constr(self):
+        """
+        Generate Autoguess relations for linear diffusion (e.g., AES MixColumns).
+        
+        Full MDS mode: For 2n vars (n inputs + n outputs), every subset of size n 
+        implies each remaining variable. Generates C(2n, n) * n implications.
+        Example: n=4 → C(8,4)*4 = 280 implications per block.
+        
+        Notes:
+        - This assumes the mapping is an MDS layer. For non-MDS matrices,
+        the constraints may be too strong.
+        - Variable names are taken directly from Variable.ID
+        """
+        
+        def _flatten(vars_):
+            for v in vars_:
+                if isinstance(v, (list, tuple)):
+                    for u in v:
+                        yield u
+                else:
+                    yield v
+        
+        try:
+            in_vars = [v.ID for v in _flatten(self.input_vars)]
+            out_vars = [v.ID for v in _flatten(self.output_vars)]
+            
+            if not in_vars or not out_vars:
+                return [f"# Matrix {getattr(self, 'ID', '?')}: empty inputs or outputs"]
+            
+            n_in = len(in_vars)
+            n_out = len(out_vars)
+            
+            # For MDS, we expect square matrix (n inputs = n outputs)
+            if n_in != n_out:
+                return [f"# Matrix {getattr(self, 'ID', '?')}: non-square matrix {n_in}x{n_out}, MDS constraints may not apply"]
+            
+            n = n_in
+            all_vars = in_vars + out_vars
+            
+            # Full MDS mode: C(2n, n) * n implications
+            # Any n of the 2n variables determine any other single variable
+            rels = []
+            for combo in itertools.combinations(all_vars, n):
+                known = set(combo)
+                lhs = ", ".join(combo)
+                for target in all_vars:
+                    if target not in known:
+                        rels.append(f"{lhs} => {target}")
+            
+            return rels
+        
+        except AttributeError:
+            return [f"# Matrix {getattr(self, 'ID', '?')}: missing input_vars or output_vars"]
+        except Exception as e:
+            return [f"# Error formatting Matrix {getattr(self, 'ID', '?')}: {e}"]
 
 
 class GF2Linear_Trans(UnaryOperator):  # Operator for the linear transformation in GF(2^n) defined by a binary matrix: y = M*x
