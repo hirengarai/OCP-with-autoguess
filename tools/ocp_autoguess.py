@@ -12,15 +12,11 @@ Usage:
     model = AutoguessModel(cipher)
     model.set_known_variables(['vs_1_0_0', ...])
     model.set_target_variables(['vs_3_4_0', ...])
-    result = model.solve(solver='sat', maxguess=10)
-
-    print(f"Guess basis size: {result.num_guesses}")
+    model.solve(solver='sat', maxguess=10)
 """
 
-import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Iterable
-from dataclasses import dataclass, field
+from typing import Any, List, Optional, Iterable
 
 from tools.relation_generator import generate_relations
 from tools.autoguess import solve_autoguess
@@ -28,54 +24,6 @@ from tools.autoguess import solve_autoguess
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[1]
-
-
-@dataclass
-class AutoguessResult:
-    """Container for Autoguess solver results."""
-    success: bool = False
-    num_guesses: int = 0
-    guess_basis: List[str] = field(default_factory=list)
-    determination_flow: List[tuple] = field(default_factory=list)
-    solver_time: float = 0.0
-    solver_type: str = ""
-    relation_count: int = 0
-    output_file: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    def __str__(self) -> str:
-        """Pretty print the result."""
-        lines = [
-            "=" * 60,
-            "Autoguess Result",
-            "=" * 60,
-            f"Success:          {self.success}",
-            f"Solver:           {self.solver_type}",
-            f"Solver Time:      {self.solver_time:.2f}s",
-            f"Relations:        {self.relation_count}",
-            f"Guess Basis Size: {self.num_guesses}",
-            "",
-            "Guess Basis Variables:",
-        ]
-
-        for i, var in enumerate(self.guess_basis, 1):
-            lines.append(f"  {i}. {var}")
-
-        if self.determination_flow:
-            lines.extend([
-                "",
-                "Determination Flow (first 10 steps):",
-            ])
-            for i, step in enumerate(self.determination_flow[:10], 1):
-                lines.append(f"  Step {i}: {step}")
-
-        lines.extend([
-            "",
-            f"Full output: {self.output_file}",
-            "=" * 60,
-        ])
-
-        return "\n".join(lines)
 
 
 class AutoguessModel:
@@ -89,21 +37,15 @@ class AutoguessModel:
 
     Parameters:
         cipher_or_function: OCP cipher or function object
-        function_mode: If True, treat as single Function (not Cipher)
-        function_type: 'BLOCK_CIPHER', 'KEY_SCHEDULE', or 'PERMUTATION'
         output_dir: Directory for output files
     """
 
     def __init__(
         self,
         cipher_or_function: Any,
-        function_mode: bool = False,
-        function_type: Optional[str] = None,
         output_dir: str = 'files'
     ):
         self.cipher_or_function = cipher_or_function
-        self.function_mode = function_mode
-        self.function_type = function_type
         output_path = Path(output_dir)
         if not output_path.is_absolute():
             output_path = _project_root() / output_path
@@ -127,6 +69,7 @@ class AutoguessModel:
         self,
         relationfile: Optional[str] = None,
         skip_layers: Optional[Iterable[str]] = None,
+        skip_rounds: Optional[Iterable[int]] = None,
         skip_operations: Optional[Iterable[str]] = None,
         skip_functions: Optional[Iterable[str]] = None,
         flat_sbox_mode: bool = True,
@@ -139,6 +82,7 @@ class AutoguessModel:
         Parameters:
             relationfile: Output filename (required)
             skip_layers: Layer IDs to skip
+            skip_rounds: Round numbers to skip
             skip_operations: Operation classes to skip
             skip_functions: Function names to skip
             flat_sbox_mode: Use flat S-box representation
@@ -158,7 +102,8 @@ class AutoguessModel:
 
         self.relations_file = relationfile
 
-        if self.function_mode:
+        is_function = not hasattr(self.cipher_or_function, "functions")
+        if is_function:
             print(f"Building {self.cipher_name.upper()} function in OCP ...")
         else:
             print(f"Building {self.cipher_name.upper()} cipher in OCP ...")
@@ -166,12 +111,12 @@ class AutoguessModel:
 
         relations = generate_relations(
             self.cipher_or_function,
-            function_mode=self.function_mode,
-            function_type=self.function_type,
+            function_mode=is_function,
             known_vars=self.known_vars,
             target_vars=self.target_vars,
             output_file=relationfile,
             skip_layers=skip_layers,
+            skip_rounds=skip_rounds,
             skip_operations=skip_operations,
             skip_functions=skip_functions,
             flat_sbox_mode=flat_sbox_mode,
@@ -194,7 +139,7 @@ class AutoguessModel:
         dglayout: str = 'dot',
         outputfile: Optional[str] = None,
         **kwargs
-    ) -> AutoguessResult:
+    ):
         """
         Solve using Autoguess to find minimal guess basis.
 
@@ -211,7 +156,7 @@ class AutoguessModel:
             **kwargs: Additional solver parameters
 
         Returns:
-            AutoguessResult object
+            None
         """
         if self.relations_file is None:
             raise ValueError("Relations not generated. Call generate_relations() first.")
@@ -249,64 +194,7 @@ class AutoguessModel:
 
         solve_autoguess(**solver_kwargs)
 
-        result = self._parse_solver_output(output_path, solver)
-        return result
-
-    def _parse_solver_output(self, output_filename: str, solver_type: str) -> AutoguessResult:
-        """Parse Autoguess solver output file."""
-        result = AutoguessResult(solver_type=solver_type)
-
-        output_path = Path(output_filename)
-        if not output_path.exists():
-            output_path = Path.cwd() / output_filename
-
-        if not output_path.exists():
-            return result
-
-        result.output_file = str(output_path)
-
-        try:
-            with output_path.open('r') as f:
-                content = f.read()
-
-            # Extract guess basis
-            guess_basis_match = re.search(
-                r'Guess basis:(.*?)(?:\n\n|\nDetermination flow:)',
-                content,
-                re.DOTALL
-            )
-            if guess_basis_match:
-                guess_vars = guess_basis_match.group(1).strip().split('\n')
-                result.guess_basis = [v.strip() for v in guess_vars if v.strip()]
-                result.num_guesses = len(result.guess_basis)
-                result.success = True
-
-            # Extract solver time
-            time_match = re.search(r'Time:\s*([\d.]+)', content)
-            if time_match:
-                result.solver_time = float(time_match.group(1))
-
-            # Extract relation count
-            rel_match = re.search(r'Number of relations:\s*(\d+)', content)
-            if rel_match:
-                result.relation_count = int(rel_match.group(1))
-
-            # Extract determination flow
-            flow_match = re.search(
-                r'Determination flow:(.*?)(?:\n\n|$)',
-                content,
-                re.DOTALL
-            )
-            if flow_match:
-                flow_lines = flow_match.group(1).strip().split('\n')
-                result.determination_flow = [
-                    line.strip() for line in flow_lines if line.strip()
-                ]
-
-        except Exception as e:
-            print(f"Warning: Error parsing output: {e}")
-
-        return result
+        return None
 
 
 def run_autoguess(
@@ -314,15 +202,13 @@ def run_autoguess(
     known_vars: Iterable[str],
     target_vars: Optional[Iterable[str]] = None,
     *,
-    function_mode: bool = False,
-    function_type: Optional[str] = None,
     solver: str = 'sat',
     maxguess: int = 10,
     maxsteps: int = 20,
     relationfile: Optional[str] = None,
     outputfile: Optional[str] = None,
     **kwargs
-) -> AutoguessResult:
+):
     """
     Run Autoguess solver in one call.
 
@@ -330,8 +216,6 @@ def run_autoguess(
         cipher_or_function: OCP cipher or function
         known_vars: Known variables
         target_vars: Target variables
-        function_mode: Treat as single function
-        function_type: 'BLOCK_CIPHER', 'KEY_SCHEDULE', or 'PERMUTATION'
         solver: Solver type
         maxguess: Maximum guesses
         maxsteps: Maximum steps
@@ -340,17 +224,9 @@ def run_autoguess(
         **kwargs: Additional solver parameters
 
     Returns:
-        AutoguessResult object
+        None
     """
-    # Auto-detect if we have a Function or Cipher
-    if not function_mode and not hasattr(cipher_or_function, 'functions'):
-        function_mode = True
-
-    model = AutoguessModel(
-        cipher_or_function,
-        function_mode=function_mode,
-        function_type=function_type
-    )
+    model = AutoguessModel(cipher_or_function)
 
     if known_vars is not None:
         model.set_known_variables(known_vars)
@@ -358,22 +234,21 @@ def run_autoguess(
         model.set_target_variables(target_vars)
 
     # Split kwargs between relation generation and solver
-    relation_params = ['skip_layers', 'skip_operations', 'skip_functions',
+    relation_params = ['skip_layers', 'skip_rounds', 'skip_operations', 'skip_functions',
                        'flat_sbox_mode', 'algebraic', 'save_dirty']
     relation_kwargs = {k: v for k, v in kwargs.items() if k in relation_params}
     solver_kwargs = {k: v for k, v in kwargs.items() if k not in relation_params}
 
     model.generate_relations(relationfile=relationfile, **relation_kwargs)
 
-    result = model.solve(
+    model.solve(
         solver=solver,
         maxguess=maxguess,
         maxsteps=maxsteps,
         outputfile=outputfile,
         **solver_kwargs
     )
+    return None
 
-    return result
 
-
-__all__ = ['AutoguessModel', 'AutoguessResult', 'run_autoguess']
+__all__ = ['AutoguessModel', 'run_autoguess']

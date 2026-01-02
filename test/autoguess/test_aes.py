@@ -15,7 +15,7 @@ import primitives.aes as aes
 from attacks import attacks
 
 # Build 1-round AES cipher
-nbr_rounds = 1
+nbr_rounds = 4
 cipher_name = "aes"
 aes_version = [128, 128]
 
@@ -27,17 +27,20 @@ cipher = aes.AES_block_cipher(cipher_name, aes_version, inp, key, outp, nbr_roun
 
 # Define known variables (input + output state)
 func = cipher.functions["PERMUTATION"]
+
 known_vars = [v.ID for v in func.vars[1][0]] + \
              [v.ID for v in func.vars[func.nbr_rounds][func.nbr_layers]]
 
 
-# Run attack using mid-level API (bypasses attacks.py)
-result = attacks.gd_attack(
+# Run attack
+attacks.gd_attack(
     cipher,
     known_vars=known_vars,
+    algebraic = False,
     solver='sat',
-    maxguess=6,
-    maxsteps=14,
+    maxguess=15,
+    maxsteps=22,
+    skip_rounds = [4],
     relationfile=f"autoguess_relations_{cipher_name}_{nbr_rounds}r.txt",
     outputfile=f"autoguess_output_{cipher_name}_{nbr_rounds}r"
 )

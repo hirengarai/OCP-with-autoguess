@@ -28,15 +28,12 @@ known = [v.ID for v in func.vars[1][0]] + \
         [v.ID for v in func.vars[2][4]]
 
 # Run attack
-result = attacks.autoguess_attack(
+attacks.gd_attack(
     cipher,
     known_vars=known,
     solver='sat',
     maxguess=20
 )
-
-
-print(f"Guess these variables: {result.guess_basis}")
 ```
 
 **Output files location**:
@@ -49,7 +46,7 @@ print(f"Guess these variables: {result.guess_basis}")
 
 ## Three Ways to Use AutoGuess
 
-### 1. High-Level API: `attacks.autoguess_attack()` (RECOMMENDED)
+### 1. High-Level API: `attacks.gd_attack()` (RECOMMENDED)
 
 **When to use**: Most cases - simple, consistent with other attack types
 
@@ -60,7 +57,7 @@ from attacks import attacks
 
 **Usage**:
 ```python
-result = attacks.autoguess_attack(
+attacks.gd_attack(
     cipher,                     # OCP cipher object
     known_vars=['vs_1_0_0', ...],  # Variables you know
     target_vars=['vs_2_4_0', ...], # Variables you want to determine (optional)
@@ -78,7 +75,6 @@ result = attacks.autoguess_attack(
 - ✅ Simplest interface
 - ✅ Automatic file management
 - ✅ Consistent with `diff_attacks()` and `linear_attacks()`
-- ✅ Returns structured `AutoGuessResult` object
 - ✅ Automatic timing output
 
 **Example - Key Schedule Analysis**:
@@ -92,7 +88,7 @@ ks = cipher.functions["KEY_SCHEDULE"]
 # Known: some key bits from multiple rounds
 known = [ks.vars[1][0][i].ID for i in range(16, 48)]
 
-result = attacks.autoguess_attack(
+attacks.gd_attack(
     ks,                         # Pass the key schedule function
     known_vars=known,
     solver='cp',
@@ -102,19 +98,19 @@ result = attacks.autoguess_attack(
 
 ---
 
-### 2. Mid-Level API: `OCPAutoGuess` Class
+### 2. Mid-Level API: `AutoguessModel` Class
 
 **When to use**: Need more control, custom relation generation, or step-by-step workflow
 
 **Import**:
 ```python
-from tools.ocp_autoguess import OCPAutoGuess
+from tools.ocp_autoguess import AutoguessModel
 ```
 
 **Usage**:
 ```python
 # Step 1: Create attack instance
-attack = OCPAutoGuess(cipher)  # or OCPAutoGuess(func, function_mode=True)
+attack = AutoguessModel(cipher)  # or AutoguessModel(func)
 
 # Step 2: Set variables
 attack.set_known_variables(['vs_1_0_0', 'vs_1_0_1', ...])
@@ -122,49 +118,43 @@ attack.set_target_variables(['vs_3_4_0', 'vs_3_4_1', ...])
 
 # Step 3: Generate relations (with custom options)
 attack.generate_relations(
-    skip_layers=['MC_'],        # Skip MixColumns operations
-    flat_sbox_mode=True,        # Flatten S-box representation
-    algebraic=True              # Use algebraic form (XOR as +)
+    skip_layers=['MatrixLayer'],    # Skip matrix/linear layer operations
+    flat_sbox_mode=True,            # Flatten S-box representation
+    algebraic=True                  # Use algebraic form (XOR as +)
 )
 
 # Step 4: Solve
-result = attack.solve(
+attack.solve(
     solver='sat',
     maxguess=10,
     maxsteps=20,
     tikz=1                      # Generate TikZ code
 )
-
-# Step 5: Analyze results
-print(result)  # Pretty-printed summary
-print(f"Guess basis: {result.guess_basis}")
-print(f"Complexity: 2^{result.num_guesses}")
 ```
 
 **Features**:
 - ✅ Fine-grained control over relation generation
 - ✅ Can skip specific layers/operations
-- ✅ Access to intermediate results
 - ✅ Reusable attack object
 
 **Example - Custom Workflow**:
 ```python
-from tools.ocp_autoguess import OCPAutoGuess
+from tools.ocp_autoguess import AutoguessModel
 import primitives.aes as aes
 
 cipher = aes.AES_block_cipher(rounds=3, key_length=128)
-attack = OCPAutoGuess(cipher)
+attack = AutoguessModel(cipher)
 
 # Define attack scenario
 func = cipher.functions["PERMUTATION"]
 attack.set_known_variables([v.ID for v in func.vars[1][0]])
 attack.set_target_variables([v.ID for v in func.vars[3][4]])
 
-# Generate relations, skipping ShiftRows
-attack.generate_relations(skip_layers=['SR_'])
+# Generate relations, skipping shift and rotation layers
+attack.generate_relations(skip_layers=['ShiftLayer', 'RotationLayer'])
 
 # Solve with CP solver
-result = attack.solve(solver='cp', tool='or-tools')
+attack.solve(solver='cp', tool='or-tools')
 ```
 
 ---
@@ -201,12 +191,11 @@ output_file = FILES_DIR / "relations_present_keysch_27r.txt"
 # Step 1: Generate relations
 relations = generate_relations(
     ks,
-    function_mode=True,
-    function_type='KEY_SCHEDULE',
     known_vars=known_vars,
     target_vars=None,
     output_file=str(output_file),
     flat_sbox_mode=False,
+    clean_key_schedule=False,
     algebraic=True,
     save_dirty=True,
     enable_cleaning=True
@@ -305,15 +294,13 @@ func = cipher.functions["PERMUTATION"]
 known = [v.ID for v in func.vars[1][0]] + \
         [v.ID for v in func.vars[2][4]]
 
-result = attacks.autoguess_attack(
+attacks.gd_attack(
     cipher,
     known_vars=known,
     solver='sat',
     maxguess=20,
     tikz=1  # Generate LaTeX for paper
 )
-
-print(f"Attack complexity: 2^{result.num_guesses}")
 ```
 
 **Output**: Check `files/autoguess/autoguess_output_aes_2r_graph.pdf`
@@ -341,7 +328,7 @@ known_pairs += [(ridx(26), 2*i) for i in range(32)]
 
 known = [ks.vars[r][0][j].ID for (r, j) in known_pairs]
 
-result = attacks.autoguess_attack(
+attacks.gd_attack(
     ks,
     known_vars=known,
     solver='cp',
@@ -355,11 +342,11 @@ result = attacks.autoguess_attack(
 ### Use Case 3: Custom Cipher Analysis with Skip Options
 
 ```python
-from tools.ocp_autoguess import OCPAutoGuess
+from tools.ocp_autoguess import AutoguessModel
 import primitives.custom_cipher as custom
 
 cipher = custom.CustomCipher(rounds=5)
-attack = OCPAutoGuess(cipher)
+attack = AutoguessModel(cipher)
 
 # Define scenario
 func = cipher.functions["PERMUTATION"]
@@ -368,16 +355,57 @@ attack.set_target_variables([v.ID for v in func.vars[5][4]])
 
 # Generate relations, but skip linear layers to focus on non-linear
 attack.generate_relations(
-    skip_layers=['LINEAR_', 'PERM_'],
+    skip_layers=['MatrixLayer', 'AddIdentityLayer'],
     flat_sbox_mode=True
 )
 
-result = attack.solve(solver='sat', maxguess=30)
+attack.solve(solver='sat', maxguess=30)
 ```
 
 ---
 
 ## Advanced Options
+
+### Skip Layers: Intuitive Layer Names
+
+When generating relations, you can skip specific layer types using intuitive names:
+
+```python
+attack.generate_relations(
+    skip_layers=['AddConstantLayer', 'RotationLayer'],  # Skip constant additions and rotations
+    skip_operations=['Equal'],                          # Skip specific operation classes
+    flat_sbox_mode=True
+)
+```
+
+**Available Layer Names**:
+
+| Layer Name | Skips Operator Classes | Description |
+|------------|----------------------|-------------|
+| `AddConstantLayer` | `ConstantXOR`, `ConstantAdd` | Constant additions (round constants) |
+| `AddIdentityLayer` | `Equal` | Identity/equality constraints |
+| `RotationLayer` | `Rot` | Rotation operations |
+| `ShiftLayer` | `Shift` | Shift operations |
+| `XORLayer` | `XOR`, `N_XOR` | XOR operations |
+| `ANDLayer` | `AND` | AND operations |
+| `ORLayer` | `OR` | OR operations |
+| `NOTLayer` | `NOT` | NOT operations |
+| `SboxLayer` | All S-box classes | S-box operations (AES, PRESENT, etc.) |
+| `MatrixLayer` | `Matrix`, `GF2Linear` | Matrix/linear transformations |
+| `ModAddLayer` | `ModAdd` | Modular addition |
+| `ModMulLayer` | `ModMul` | Modular multiplication |
+| `CopyLayer` | `CopyOperator`, `COPY` | Copy/duplication operations |
+
+**Direct Class Names**: You can also use the actual operator class names directly:
+```python
+skip_layers=['ConstantXOR', 'Rot', 'Matrix']  # Direct class names
+```
+
+**Use Cases**:
+- Skip `AddConstantLayer` to ignore round constants in key schedule analysis
+- Skip `MatrixLayer` to focus on non-linear operations (S-boxes)
+- Skip `RotationLayer` to simplify ARX cipher analysis
+- Skip `SboxLayer` to analyze linear components only
 
 ### Solver Types and When to Use Them
 
@@ -408,7 +436,7 @@ result = attack.solve(solver='sat', maxguess=30)
 
 #### SAT Solver
 ```python
-result = attacks.autoguess_attack(
+attacks.gd_attack(
     cipher,
     known_vars=known,
     solver='sat',
@@ -419,7 +447,7 @@ result = attacks.autoguess_attack(
 
 #### CP Solver with Preprocessing
 ```python
-result = attacks.autoguess_attack(
+attacks.gd_attack(
     cipher,
     known_vars=known,
     solver='cp',
@@ -432,7 +460,7 @@ result = attacks.autoguess_attack(
 
 #### Generate TikZ for Publications
 ```python
-result = attacks.autoguess_attack(
+attacks.gd_attack(
     cipher,
     known_vars=known,
     solver='sat',
@@ -452,16 +480,12 @@ result = attacks.autoguess_attack(
 ```python
 # Simple attack (recommended for most users)
 from attacks import attacks
-result = attacks.autoguess_attack(cipher, known_vars=known, solver='sat', maxguess=20)
+attacks.gd_attack(cipher, known_vars=known, solver='sat', maxguess=20)
 
 # Check output files
 # - Text report: files/autoguess/autoguess_output_<cipher>_<rounds>r
 # - Graph PDF:   files/autoguess/autoguess_output_<cipher>_<rounds>r_graph.pdf
 
-# Access results
-print(f"Complexity: 2^{result.num_guesses}")
-print(f"Guess: {result.guess_basis}")
-print(result)  # Pretty summary
 ```
 
 ### File Locations Summary
@@ -478,9 +502,9 @@ print(result)  # Pretty summary
 
 ## Summary
 
-**For most users**: Use `attacks.autoguess_attack()` - it's simple, consistent, and handles everything automatically.
+**For most users**: Use `attacks.gd_attack()` - it's simple, consistent, and handles everything automatically.
 
-**For advanced users**: Use `OCPAutoGuess` class for fine control over relation generation.
+**For advanced users**: Use `AutoguessModel` for fine control over relation generation.
 
 **For researchers**: Use low-level API for maximum flexibility and batch experiments.
 

@@ -17,6 +17,6 @@ Usage:
     print(f"Guess basis size: {result.num_guesses}")
 """
 
-from tools.ocp_autoguess import AutoguessModel, run_autoguess, AutoguessResult
+from tools.ocp_autoguess import AutoguessModel, run_autoguess
 
-__all__ = ['run_autoguess', 'AutoguessModel', 'AutoguessResult']
+__all__ = ['run_autoguess', 'AutoguessModel']

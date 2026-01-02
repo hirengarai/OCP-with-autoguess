@@ -10,7 +10,8 @@ Usage:
     # For a single function
     relations = genRelationsForFunction(
         key_schedule_func,
-        skip_layers=['MC_'],
+        skip_layers=['MatrixLayer', 'AddConstantLayer'],
+        skip_rounds=[3, 4],
         flat_sbox_mode=True,
         algebraic=True
     )
@@ -18,8 +19,9 @@ Usage:
     # For a full cipher
     relations = genRelations(
         aes_cipher,
-        skip_layers=['MC_'],
+        skip_layers=['MatrixLayer', 'RotationLayer'],
         skip_functions=['PERMUTATION'],
+        skip_rounds=[1, 2],
         flat_sbox_mode=True,
         algebraic=True
     )
@@ -27,6 +29,26 @@ Usage:
 
 import inspect
 from typing import Any, Dict, Iterable, List, Optional, Set
+
+
+# Mapping from intuitive layer names to operator class names
+LAYER_NAME_MAPPING = {
+    "AddConstantLayer": {"ConstantXOR", "ConstantAdd"},
+    "AddIdentityLayer": {"Equal"},
+    "RotationLayer": {"Rot"},
+    "ShiftLayer": {"Shift"},
+    "XORLayer": {"XOR", "N_XOR"},
+    "ANDLayer": {"AND"},
+    "ORLayer": {"OR"},
+    "NOTLayer": {"NOT"},
+    "SboxLayer": {"Sbox", "AES_Sbox", "Skinny_4bit_Sbox", "Skinny_8bit_Sbox",
+                  "GIFT_Sbox", "ASCON_Sbox", "TWINE_Sbox", "PRESENT_Sbox",
+                  "KNOT_Sbox", "PRINCE_Sbox"},
+    "MatrixLayer": {"Matrix", "GF2Linear"},
+    "ModAddLayer": {"ModAdd"},
+    "ModMulLayer": {"ModMul"},
+    "CopyLayer": {"CopyOperator", "COPY"},
+}
 
 
 def _is_algebraic_line(line: str) -> bool:
@@ -41,14 +63,25 @@ def _is_algebraic_line(line: str) -> bool:
     return ("+" in s) and ("=>" not in s)
 
 
-def _should_skip_layer(opid: str, skip_layers: Set[str]) -> bool:
-    """Check if an operation should be skipped based on its ID prefix."""
+def _should_skip_layer(clsname: str, skip_layers: Set[str]) -> bool:
+    """
+    Check if an operation should be skipped based on its class name.
+
+    Supports intuitive layer names (e.g., 'AddConstantLayer', 'RotationLayer')
+    as well as direct class names (e.g., 'ConstantXOR', 'Rot').
+    """
     if not skip_layers:
         return False
 
-    for pattern in skip_layers:
-        if opid.startswith(pattern):
+    for layer_name in skip_layers:
+        # Check if it's a friendly layer name that needs mapping
+        if layer_name in LAYER_NAME_MAPPING:
+            if clsname in LAYER_NAME_MAPPING[layer_name]:
+                return True
+        # Otherwise treat it as a direct class name
+        elif clsname == layer_name:
             return True
+
     return False
 
 
@@ -114,6 +147,7 @@ def genRelationsForFunction(
     *,
     skip_layers: Optional[Iterable[str]] = None,
     skip_operations: Optional[Iterable[str]] = None,
+    skip_rounds: Optional[Iterable[int]] = None,
     flat_sbox_mode: bool = True,
     algebraic: bool = True,
 ) -> List[str]:
@@ -130,12 +164,18 @@ def genRelationsForFunction(
         A Function-like object from OCP with constraints[r][l] structure.
 
     skip_layers : iterable of str, optional
-        Layer ID prefixes to skip (e.g., ['MC_', 'SR_']).
-        Operations whose ID starts with these prefixes will be skipped.
+        Intuitive layer names to skip (e.g., ['AddConstantLayer', 'RotationLayer']).
+        Also supports direct class names (e.g., ['ConstantXOR', 'Rot']).
+        Operations of these types will be skipped.
 
     skip_operations : iterable of str, optional
         Operation class names to skip entirely (e.g., ['Equal', 'Rot']).
         All operations of these classes will be skipped.
+
+    skip_rounds : iterable of int, optional
+        Round numbers to skip entirely. If provided, round-to-round links
+        are rebuilt to bypass skipped rounds so no variables from those
+        rounds appear in the relations.
 
     flat_sbox_mode : bool, default=True
         If True, S-boxes emit flat (direct) constraint lines.
@@ -155,7 +195,7 @@ def genRelationsForFunction(
     --------
     >>> relations = genRelationsForFunction(
     ...     key_schedule_func,
-    ...     skip_layers=['MC_'],
+    ...     skip_layers=['MatrixLayer', 'AddConstantLayer'],
     ...     flat_sbox_mode=True,
     ...     algebraic=True
     ... )
@@ -166,6 +206,9 @@ def genRelationsForFunction(
 
     skip_layer_set: Set[str] = set(skip_layers or [])
     skip_op_set: Set[str] = set(skip_operations or [])
+    skip_round_set: Set[int] = {
+        r for r in (skip_rounds or []) if isinstance(r, int) and 1 <= r <= nrounds
+    }
 
     conn: List[str] = []
     alg: List[str] = []
@@ -179,6 +222,9 @@ def genRelationsForFunction(
 
     # Walk through all rounds and layers
     for r in range(1, nrounds + 1):
+        if r in skip_round_set:
+            continue
+
         for l in range(0, nlayers + 1):
             try:
                 ops = func.constraints[r][l]
@@ -194,8 +240,12 @@ def genRelationsForFunction(
                 if clsname in skip_op_set:
                     continue
 
-                # Skip if layer ID matches skip pattern
-                if _should_skip_layer(opid, skip_layer_set):
+                # Skip if layer class name matches skip pattern
+                if _should_skip_layer(clsname, skip_layer_set):
+                    continue
+
+                # Skip built-in round-link constraints when rebuilding links
+                if skip_round_set and opid.startswith("LINK_EQ_"):
                     continue
 
                 # Check if operation has the required method
@@ -234,6 +284,23 @@ def genRelationsForFunction(
                     else:
                         conn.append(line_str)
 
+    if skip_round_set:
+        kept_rounds = [r for r in range(1, nrounds + 1) if r not in skip_round_set]
+        prev_round = None
+        for r in kept_rounds:
+            if prev_round is None:
+                prev_round = r
+                continue
+            try:
+                in_vars = func.vars[prev_round][nlayers]
+                out_vars = func.vars[r][0]
+            except Exception:
+                prev_round = r
+                continue
+            for in_var, out_var in zip(in_vars, out_vars):
+                conn.append(f"{in_var.ID}, {out_var.ID}")
+            prev_round = r
+
     total = len(conn) + len(alg)
     # Removed verbose output for cleaner console
     # print(f"[RelationEmitter] Generated {total} relations ({len(conn)} connection, {len(alg)} algebraic)")
@@ -248,6 +315,7 @@ def genRelations(
     skip_layers: Optional[Iterable[str]] = None,
     skip_operations: Optional[Iterable[str]] = None,
     skip_functions: Optional[Iterable[str]] = None,
+    skip_rounds: Optional[Iterable[int]] = None,
     flat_sbox_mode: bool = True,
     algebraic: bool = True,
 ) -> List[str]:
@@ -266,8 +334,9 @@ def genRelations(
         - optional nbr_rounds : number of rounds
 
     skip_layers : iterable of str, optional
-        Layer ID prefixes to skip (e.g., ['MC_', 'SR_']).
-        Operations whose ID starts with these prefixes will be skipped.
+        Intuitive layer names to skip (e.g., ['AddConstantLayer', 'RotationLayer']).
+        Also supports direct class names (e.g., ['ConstantXOR', 'Rot']).
+        Operations of these types will be skipped.
 
     skip_operations : iterable of str, optional
         Operation class names to skip entirely (e.g., ['Equal', 'Rot']).
@@ -276,6 +345,11 @@ def genRelations(
     skip_functions : iterable of str, optional
         Function names to skip entirely (e.g., ['KEY_SCHEDULE', 'PERMUTATION']).
         These functions will not be processed at all.
+
+    skip_rounds : iterable of int, optional
+        Round numbers to skip entirely. If provided, round-to-round links
+        are rebuilt to bypass skipped rounds so no variables from those
+        rounds appear in the relations.
 
     flat_sbox_mode : bool, default=True
         If True, S-boxes emit flat (direct) constraint lines.
@@ -295,7 +369,7 @@ def genRelations(
     --------
     >>> relations = genRelations(
     ...     aes_cipher,
-    ...     skip_layers=['MC_'],
+    ...     skip_layers=['MatrixLayer', 'RotationLayer'],
     ...     skip_functions=['PERMUTATION'],
     ...     flat_sbox_mode=True,
     ...     algebraic=True
@@ -324,6 +398,7 @@ def genRelations(
             func,
             skip_layers=skip_layers,
             skip_operations=skip_operations,
+            skip_rounds=skip_rounds,
             flat_sbox_mode=flat_sbox_mode,
             algebraic=algebraic,
         )

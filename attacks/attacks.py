@@ -91,7 +91,7 @@ def gd_attack(cipher, known_vars=None, target_vars=None, solver="sat", maxguess=
 
     Returns
     -------
-    AutoguessResult
+    object
         Result object with num_guesses and guess_basis
 
     Examples

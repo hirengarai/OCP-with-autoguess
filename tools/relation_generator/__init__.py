@@ -129,6 +129,7 @@ def generate_relations(
     # Emitter parameters
     skip_layers: Optional[Iterable[str]] = None,
     skip_operations: Optional[Iterable[str]] = None,
+    skip_rounds: Optional[Iterable[int]] = None,
     skip_functions: Optional[Iterable[str]] = None,
     flat_sbox_mode: bool = True,
     algebraic: bool = True,
@@ -173,6 +174,10 @@ def generate_relations(
 
     skip_operations : iterable of str, optional
         Operation class names to skip entirely (e.g., ['Equal', 'Rot']).
+
+    skip_rounds : iterable of int, optional
+        Round numbers to skip entirely. When skipping, round-to-round links
+        are rebuilt to bypass skipped rounds.
 
     skip_functions : iterable of str, optional
         Function names to skip (only used when function_mode=False).
@@ -257,6 +262,7 @@ def generate_relations(
             cipher_or_function,
             skip_layers=skip_layers,
             skip_operations=skip_operations,
+            skip_rounds=skip_rounds,
             flat_sbox_mode=flat_sbox_mode,
             algebraic=algebraic,
         )
@@ -267,6 +273,7 @@ def generate_relations(
             skip_layers=skip_layers,
             skip_operations=skip_operations,
             skip_functions=skip_functions,
+            skip_rounds=skip_rounds,
             flat_sbox_mode=flat_sbox_mode,
             algebraic=algebraic,
         )
