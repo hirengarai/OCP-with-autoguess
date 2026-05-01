@@ -13,6 +13,7 @@ if str(ROOT_DIR) not in sys.path:
 from variables.variables import Variable
 import primitives.aes as aes
 from attacks import attacks
+from attacks.guess_and_determine import RelGenConfig, SolverConfig
 
 # Build 1-round AES cipher
 nbr_rounds = 4
@@ -33,14 +34,10 @@ known_vars = [v.ID for v in func.vars[1][0]] + \
 
 
 # Run attack
-attacks.gd_attack(
+attacks.guess_and_determine_attack(
     cipher,
     known_vars=known_vars,
-    algebraic = False,
-    solver='sat',
-    maxguess=15,
-    maxsteps=22,
-    skip_rounds = [4],
-    relationfile=f"autoguess_relations_{cipher_name}_{nbr_rounds}r.txt",
-    outputfile=f"autoguess_output_{cipher_name}_{nbr_rounds}r"
+    output_file=f"relations_{cipher_name}_{nbr_rounds}r.txt",
+    relgen_cfg=RelGenConfig(skip_rounds=[4]),
+    solver_cfg=SolverConfig(solver="sat", maxguess=15, maxsteps=22),
 )

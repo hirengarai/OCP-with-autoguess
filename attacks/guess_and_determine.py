@@ -5,94 +5,46 @@ Guess-and-determine engine.
   1. Generate a relation file from the cipher/function (relation_generator).
   2. Solve it with AutoGuess to find a minimal guess basis.
 
+Configuration is grouped via two dataclasses:
+
+    from attacks.guess_and_determine import RelGenConfig, SolverConfig
+
+    result = search_guess_basis(
+        cipher,
+        target_vars=[...],
+        relgen_cfg=RelGenConfig(skip_rounds=[4], flat_sbox=False),
+        solver_cfg=SolverConfig(solver="sat", findmin=True, maxguess=20),
+    )
+
 The function auto-detects whether its input is a full cipher (has
 `.functions`) or a single function (has `.constraints` directly).
 
-This module is the *engine*. The user-facing wrapper with timing lives in
-`attacks.attacks` as `guess_and_determine_attack`.
+The user-facing wrapper with timing lives in `attacks.attacks` as
+`guess_and_determine_attack`.
 """
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import List, Optional
 
 from tools.autoguess_wrapper import run_autoguess
 from tools.relation_generator import generate_relations
 
 
-def search_guess_basis(
-    cipher_or_function,
-    *,
-    # Variable sections
-    known_vars=None,
-    target_vars=None,
-    not_guessed_vars=None,
-    protect_all_targets=False,
-    # Relation generation options
-    name_prefix=None,
-    skip_layers=None,
-    skip_ops=None,
-    skip_rounds=None,
-    skip_functions=None,
-    flat_sbox=True,
-    algebraic_layers=None,
-    perm_rename=True,
-    rot_rename=True,
-    gf2linear_rename=True,
-    output_file=None,
-    canonical=True,
-    cross_round_dir=False,
-    bridge_skipped_rounds=True,
-    # AutoGuess solver options
-    solver="sat",
-    findmin=False,
-    maxguess=None,
-    maxsteps=None,
-    reducebasis=False,
-    drawgraph=True,
-    satsolver="cadical153",
-    smtsolver="z3",
-    cpsolver="cp-sat",
-    milpdirection="min",
-    cpoptimization=1,
-    timelimit=-1,
-    threads=0,
-    preprocess=0,
-    tikz=0,
-    dglayout="dot",
-    log=0,
-):
+# ---------------------------------------------------------------------------
+# Configuration objects
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RelGenConfig:
     """
-    Run a guess-and-determine attack on an OCP cipher or function.
+    Options forwarded to `tools.relation_generator.generate_relations`.
 
-    Parameters
-    ----------
-    cipher_or_function : Cipher or Function object from OCP.
-        Pass a full cipher or a single function (e.g.
-        `cipher.functions["KEY_SCHEDULE"]`).
-
-    --- Variable sections ---
-
-    known_vars : list of str, optional
-        Variable IDs initially known to the attacker (e.g. plaintext
-        / ciphertext bytes). These don't need to be guessed or determined.
-
-    target_vars : list of str, optional
-        Variable IDs that must be determined by the end. The solver
-        finds the minimum set of guesses needed to determine all targets.
-
-    not_guessed_vars : list of str, optional
-        Variable IDs the solver is forbidden from guessing. Useful for
-        key recovery where only key variables (vk_*) should be guessable,
-        so all state variables (vs_*) are placed here.
-
-    protect_all_targets : bool, default False
-        If True, every target variable is implicitly added to
-        not_guessed_vars (key recovery). If False, only the first target
-        is protected (default for plain guess-and-determine).
-
-    --- Relation generation options ---
-
+    All fields default to the same values as the underlying generator,
+    so `RelGenConfig()` is a no-op override.
     name_prefix : str, optional
         Prefix for the output relation/result filenames.
 
@@ -121,27 +73,104 @@ def search_guess_basis(
 
     bridge_skipped_rounds : bool, default True
         If True, equate values across skipped rounds via bridge relations.
+    """
 
-    --- AutoGuess solver options ---
+    skip_layers: Optional[List[str]] = None
+    skip_ops: Optional[List[str]] = None
+    skip_rounds: Optional[List[int]] = None
+    skip_functions: Optional[List[str]] = None
+    flat_sbox: bool = True
+    algebraic_layers: Optional[List[str]] = None
+    perm_rename: bool = True
+    rot_rename: bool = True
+    gf2linear_rename: bool = True
+    canonical: bool = True
+    cross_round_dir: bool = False
+    bridge_skipped_rounds: bool = True
 
-    solver : str, default "sat"
-        Backend: 'sat' | 'milp' | 'smt' | 'cp' | 'mark' | 'elim' | 'propagate'.
 
-    findmin : bool, default False
-        If True, iterate to find the minimum guess count.
+@dataclass
+class SolverConfig:
+    """
+    Options forwarded to `tools.autoguess_wrapper.run_autoguess`.
 
-    maxguess : int, optional
-        Upper bound on guessed variables.
+    `solver` selects the backend: 'sat' | 'milp' | 'smt' | 'cp' |
+    'mark' | 'elim' | 'propagate'. `reducebasis=True` reroutes through
+    the propagation-based reducer regardless of the chosen backend.
+    """
 
-    maxsteps : int, optional
-        Maximum determination depth.
+    solver: str = "sat"
+    findmin: bool = False
+    maxguess: Optional[int] = None
+    maxsteps: Optional[int] = None
+    reducebasis: bool = False
+    drawgraph: bool = True
+    satsolver: str = "cadical153"
+    smtsolver: str = "z3"
+    cpsolver: str = "cp-sat"
+    milpdirection: str = "min"
+    cpoptimization: int = 1
+    timelimit: int = -1
+    threads: int = 0
+    preprocess: int = 0
+    tikz: int = 0
+    dglayout: str = "dot"
+    log: int = 0
 
-    Other options forwarded to the AutoGuess wrapper.
+
+# ---------------------------------------------------------------------------
+# Engine
+# ---------------------------------------------------------------------------
+
+
+def search_guess_basis(
+    cipher_or_function,
+    *,
+    # Variable selection — the actual arguments to the attack
+    known_vars: Optional[List[str]] = None,
+    target_vars: Optional[List[str]] = None,
+    not_guessed_vars: Optional[List[str]] = None,
+    protect_all_targets: bool = False,
+    # Output naming — orchestration concerns
+    name_prefix: Optional[str] = None,
+    output_file: Optional[str] = None,
+    # Configuration groups
+    relgen_cfg: Optional[RelGenConfig] = None,
+    solver_cfg: Optional[SolverConfig] = None,
+):
+    """
+    Run a guess-and-determine attack on an OCP cipher or function.
+
+    Parameters
+    ----------
+    cipher_or_function : Cipher or Function from OCP.
+        Pass a full cipher or a single function (e.g.
+        `cipher.functions["KEY_SCHEDULE"]`).
+
+    known_vars, target_vars, not_guessed_vars : list of str, optional
+        Variable IDs marking initial knowns, recovery targets, and
+        variables forbidden from being guessed.
+
+    protect_all_targets : bool, default False
+        If True, every target variable is implicitly added to
+        not_guessed_vars (key recovery). If False, only the first
+        target is protected.
+
+    name_prefix : str, optional
+        Prefix for the auto-generated relation/output filenames.
+
+    output_file : str, optional
+        Explicit relation-file path. If None, auto-generated.
+
+    relgen_cfg : RelGenConfig, optional
+        Relation-generation options. Defaults applied if None.
+
+    solver_cfg : SolverConfig, optional
+        AutoGuess solver options. Defaults applied if None.
 
     Returns
     -------
     dict
-        Result dictionary containing:
         - 'outputfile'         : path to AutoGuess output
         - 'cipher'             : input cipher / function
         - 'known_variables'    : OCP Variables marked known
@@ -149,6 +178,9 @@ def search_guess_basis(
         - 'guessed_variables'  : OCP Variables in the guess basis
         - 'determination_steps': list of {step, determined_vars}
     """
+    relgen_cfg = relgen_cfg or RelGenConfig()
+    solver_cfg = solver_cfg or SolverConfig()
+
     function_mode = not hasattr(cipher_or_function, "functions")
 
     # Ensure not all targets are guessable (would yield trivial solution).
@@ -177,18 +209,7 @@ def search_guess_basis(
         target=target_vars,
         not_guessed=not_guessed_vars,
         output_file=output_file,
-        skip_layers=skip_layers,
-        skip_ops=skip_ops,
-        skip_rounds=skip_rounds,
-        skip_functions=skip_functions,
-        flat_sbox=flat_sbox,
-        algebraic_layers=algebraic_layers,
-        perm_rename=perm_rename,
-        rot_rename=rot_rename,
-        gf2linear_rename=gf2linear_rename,
-        canonical=canonical,
-        cross_round_dir=cross_round_dir,
-        bridge_skipped_rounds=bridge_skipped_rounds,
+        **asdict(relgen_cfg),
     )
 
     # Resolve output_file path (matches generate_relations' resolution).
@@ -213,24 +234,8 @@ def search_guess_basis(
         inputfile=output_file,
         cipher_or_function=cipher_or_function,
         outputfile=ag_outputfile,
-        solver=solver,
-        findmin=findmin,
-        maxguess=maxguess,
-        maxsteps=maxsteps,
-        reducebasis=reducebasis,
         known=known_vars,
-        drawgraph=drawgraph,
-        satsolver=satsolver,
-        smtsolver=smtsolver,
-        cpsolver=cpsolver,
-        milpdirection=milpdirection,
-        cpoptimization=cpoptimization,
-        timelimit=timelimit,
-        threads=threads,
-        preprocess=preprocess,
-        tikz=tikz,
-        dglayout=dglayout,
-        log=log,
+        **asdict(solver_cfg),
     )
 
     return result

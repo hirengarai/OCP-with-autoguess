@@ -11,6 +11,7 @@ if str(ROOT_DIR) not in sys.path:
 from variables.variables import Variable
 import primitives.skinny as skinny
 from attacks import attacks
+from attacks.guess_and_determine import RelGenConfig, SolverConfig
 
 # Build SKINNY-64-128 cipher (TK2 version)
 nbr_rounds = 20
@@ -40,17 +41,12 @@ target_vars = [
 ]
 
 relationfile = f"relations_{cipher_name}_{nbr_rounds}r.txt"
-outputfile = f"output_{cipher_name}_{nbr_rounds}r.txt"
 
 # Run Autoguess
-attacks.gd_attack(
+attacks.guess_and_determine_attack(
     KS,
     target_vars=target_vars,
-    skip_rounds=list(range(1, 16)) + [21],
-    solver='sat',
-    algebraic=False,
-    maxguess=19,
-    maxsteps=12,
-    relationfile=relationfile,
-    outputfile=outputfile
+    output_file=relationfile,
+    relgen_cfg=RelGenConfig(skip_rounds=list(range(1, 16)) + [21]),
+    solver_cfg=SolverConfig(solver="sat", maxguess=19, maxsteps=12),
 )

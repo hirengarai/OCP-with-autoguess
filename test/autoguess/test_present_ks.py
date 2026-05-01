@@ -13,6 +13,7 @@ if str(ROOT_DIR) not in sys.path:
 from variables.variables import Variable
 import primitives.present as present
 from attacks import attacks
+from attacks.guess_and_determine import RelGenConfig, SolverConfig
 
 
 # Build PRESENT cipher
@@ -53,17 +54,12 @@ known_pairs += [(ridx(26), 2*i) for i in range(32)]
 known_vars = [KS.vars[r][0][j].ID for (r, j) in known_pairs]
 
 relationfile = f"relations_{cipher_name}_{nbr_rounds}r.txt"
-outputfile = f"output_{cipher_name}_{nbr_rounds}r.txt"
 
 # Run Autoguess
 result = attacks.guess_and_determine_attack(
     KS,
     target_vars=known_vars,
-    solver='cp',
-    preprocess = 1,
-    flat_sbox_mode = False,
-    maxguess=60,
-    maxsteps=10,
-    relationfile=relationfile,
-    outputfile=outputfile
+    output_file=relationfile,
+    relgen_cfg=RelGenConfig(flat_sbox=False),
+    solver_cfg=SolverConfig(solver="cp", preprocess=1, maxguess=60, maxsteps=10),
 )

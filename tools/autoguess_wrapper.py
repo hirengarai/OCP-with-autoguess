@@ -19,6 +19,7 @@ This wrapper handles that path setup, then exposes a simple function:
 AutoGuess itself is NOT modified — it stays self-contained.
 """
 
+import functools
 import os
 import re
 import sys
@@ -38,6 +39,7 @@ def _with_autoguess_path(func):
       - cwd to be its own directory (for 'temp/' relative paths)
     """
 
+    @functools.wraps(func)
     def wrapper(*args, **kwargs):
         old_path = sys.path[:]
         old_cwd = os.getcwd()
