@@ -1,7 +1,14 @@
+'''
+Created on Oct 4, 2020
+Updated by Hiren on May 5, 2025 (removed sage dependency)
+
+@author: Hosein Hadipour
+@contact: hsn.hadipour@gmail.com
+'''
+
 import time
 import sys
 import re
-from pathlib import Path
 from datetime import datetime
 from argparse import ArgumentParser, RawTextHelpFormatter
 from itertools import combinations
@@ -253,16 +260,7 @@ class Macaulay:
         using variable names in self.variable_names and monomials in self.mons.
         Also prints each equation to the console.
         """
-        output_path = Path(self.outputfile)
-        project_root = Path(__file__).resolve().parents[3]
-        if output_path.is_absolute():
-            try:
-                printable_path = output_path.relative_to(project_root)
-            except ValueError:
-                printable_path = output_path
-        else:
-            printable_path = output_path
-        print('Writing the results into the %s - %s' % (printable_path, datetime.now()))
+        print('Writing the results into the %s - %s' % (self.outputfile, datetime.now()))
         t0 = time.time()
         try:
             with open(self.outputfile, 'w') as outf:
@@ -273,7 +271,7 @@ class Macaulay:
                     terms = []
                     for j, bit in enumerate(row):
                         if bit:
-                            mono = self.mons[j]             # e.g. (0,1,0,1,0,...)
+                            mono = self.mons[j]             
                             if sum(mono) == 0:
                                 # constant term
                                 terms.append('1')
@@ -294,7 +292,7 @@ class Macaulay:
             sys.exit(1)
 
         elapsed = time.time() - t0
-        print(f"Result was written into {printable_path} after {elapsed:.2f} seconds")
+        print(f"Result was written into {self.outputfile} after {elapsed:.2f} seconds")
     
 def loadparameters(args):
     """

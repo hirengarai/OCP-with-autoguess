@@ -1,24 +1,69 @@
-'''
+"""
 Created on Aug 29, 2020
 
 @author: Hosein Hadipour
 @contact: hsn.hadipour@gmail.com
-'''
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+In case you use this tool please include the above copyright informations (name, contact, license)
+"""
 
 from config import TEMP_DIR
 import os
 import time
 import random
-from pysmt.shortcuts import TRUE, Symbol, BVAdd, BVAnd, BVOr, BVMul, BVULE, BVZExt, Solver, types, BV, Equals, write_smtlib
+
+# Compatibility shim: newer pyboolector (>=3.2.4) moved BTOR_OPT_*
+# constants into BtorOption enum, but pySMT still references them as
+# module-level attributes.  Re-export them so pySMT can find them.
+try:
+    import pyboolector
+
+    if not hasattr(pyboolector, "BTOR_OPT_MODEL_GEN"):
+        for _name in dir(pyboolector.BtorOption):
+            if _name.startswith("BTOR_OPT_"):
+                setattr(pyboolector, _name, getattr(pyboolector.BtorOption, _name))
+except ImportError:
+    pass  # pyboolector not installed; btor solver simply won't be available
+
+from pysmt.shortcuts import (
+    TRUE,
+    Symbol,
+    BVAdd,
+    BVAnd,
+    BVOr,
+    BVMul,
+    BVULE,
+    BVZExt,
+    Solver,
+    types,
+    BV,
+    Equals,
+    write_smtlib,
+)
 from math import ceil, log2
 from core.inputparser import read_relation_file
 from core.parsesolution import parse_solver_solution
-# from core.graphdrawer import draw_graph
+from core.graphdrawer import draw_graph
+from core.varnames import step_var, path_var
+
 
 class ReduceGDtoSMT:
     """
     ReduceGDtoSMT
-    Using the PySMT, this class reduces the guess-and-determine attack and 
+    Using the PySMT, this class reduces the guess-and-determine attack and
     key-bridging to an SMT (or SAT) problem, and then solves a SMT (or a SAT) solver to solve it.
 
     Created by Hosein Hadipour
@@ -31,48 +76,72 @@ class ReduceGDtoSMT:
 
     count = 0
 
-    def __init__(self, inputfile_name=None, outputfile_name='output', max_guess=0, max_steps=0, smt_solver_name='z3',\
-        tikz=0, preprocess=1, D=1, dglayout="dot", log=0):
+    def __init__(
+        self,
+        inputfile_name=None,
+        outputfile_name="output",
+        max_guess=0,
+        max_steps=0,
+        smt_solver_name="z3",
+        tikz=0,
+        preprocess=1,
+        D=1,
+        dglayout="dot",
+        drawgraph=True,
+        log=0,
+        extra_known=None,
+    ):
         self.inputfile_name = inputfile_name
         self.output_dir = outputfile_name
-        self.rnd_string_tmp = '%030x' % random.randrange(16**30)
+        self.rnd_string_tmp = "%030x" % random.randrange(16**30)
         self.max_guess = max_guess
         self.max_steps = max_steps
         self.smt_solver_name = smt_solver_name
         self.dglayout = dglayout
+        self.draw_graph = drawgraph
         self.log = log
         # Supported SMT solvers:
         # msat      True (5.6.1)
-        # cvc4      True (1.7-prerelease)
-        # z3        True (4.8.8)
+        # cvc5      True (1.3.2)
+        # z3        True (4.16.0)
         # yices     True (2.6.2)
         # btor      True (3.2.1)
         # picosat   True (965)
         # bdd       True (2.0.3)
-        self.supported_smt_solvers = [
-            'msat', 'cvc4', 'z3', 'yices', 'btor', 'picosat', 'bdd']
-        assert(self.smt_solver_name in self.supported_smt_solvers)
-        self.smt_solver = Solver(name=smt_solver_name, logic='QF_BV')
+        try:
+            from pysmt.environment import get_env
+
+            self.supported_smt_solvers = sorted(get_env().factory._all_solvers.keys())
+        except Exception:
+            self.supported_smt_solvers = ["z3"]
+        assert self.smt_solver_name in self.supported_smt_solvers
+        self.smt_solver = Solver(name=smt_solver_name, logic="QF_BV")
         self.smt_formula = TRUE()
         ###############################
         # Read and parse the input file
-        parsed_data = read_relation_file(self.inputfile_name, preprocess=preprocess, D=D, log=self.log)
+        parsed_data = read_relation_file(
+            self.inputfile_name,
+            preprocess=preprocess,
+            D=D,
+            log=self.log,
+            extra_known=extra_known,
+        )
+        self.problem_name = parsed_data["problem_name"]
+        self.variables = parsed_data["variables"]
+        self.known_variables = parsed_data["known_variables"]
+        self.target_variables = parsed_data["target_variables"]
+        self.notguessed_variables = parsed_data["notguessed_variables"]
+        self.symmetric_relations = parsed_data["symmetric_relations"]
+        self.implication_relations = parsed_data["implication_relations"]
         self.dummy_mapping = parsed_data.get("dummy_mapping", {})
-        self.problem_name = parsed_data['problem_name']
-        self.variables = parsed_data['variables']
-        self.known_variables = parsed_data['known_variables']
-        self.target_variables = parsed_data['target_variables']
-        self.notguessed_variables = parsed_data['notguessed_variables']
-        self.symmetric_relations = parsed_data['symmetric_relations']
-        self.implication_relations = parsed_data['implication_relations']
-        self.num_of_relations = len(
-            self.symmetric_relations) + len(self.implication_relations)
+        self.num_of_relations = len(self.symmetric_relations) + len(
+            self.implication_relations
+        )
         self.num_of_vars = len(self.variables)
-        ###############################        
+        ###############################
         if self.max_guess > self.num_of_vars:
             self.max_guess = self.num_of_vars
-            print('Number of guessed variables is at most: %d' %
-                  self.num_of_vars)
+            print("Number of guessed variables is at most: %d" % self.num_of_vars)
         self.deductions = self.generate_possible_deductions()
         self.variables_dictionary = dict()
         self.time_limit = -1
@@ -80,7 +149,7 @@ class ReduceGDtoSMT:
 
     def ordered_set(self, seq):
         """
-        This method eliminates duplicated elements in a given list, 
+        This method eliminates duplicated elements in a given list,
         and returns a list in which each elements appears only once
         """
         seen = set()
@@ -89,85 +158,94 @@ class ReduceGDtoSMT:
 
     def generate_possible_deductions(self):
         """
-        This method generates all possible deductions 
+        This method generates all possible deductions
 
-        Core idea of information propagation: 
-            If there is a relation in which all terms are known except one, 
-            then the value of the last term can be determined as well. 
+        Core idea of information propagation:
+            If there is a relation in which all terms are known except one,
+            then the value of the last term can be determined as well.
         """
+        # Build inverted indices for O(1) lookup instead of O(|R|) scan per variable
+        from collections import defaultdict
+
+        sym_index = defaultdict(list)
+        for rel in self.symmetric_relations:
+            for v in rel:
+                sym_index[v].append(rel)
+        impl_index = defaultdict(list)
+        for rel in self.implication_relations:
+            impl_index[rel[-1]].append(rel)
+
         possible_deductions = {}
         for v in self.variables:
             possible_deductions[v] = [[v]]
-            for rel in self.symmetric_relations:
-                if v in rel:
-                    temp = rel.copy()
-                    temp.remove(v)
-                    possible_deductions[v].append(temp)
-            for rel in self.implication_relations:
-                if v == rel[-1]:
-                    temp = rel.copy()
-                    temp.remove(v)
-                    possible_deductions[v].append(temp)
+            for rel in sym_index.get(v, []):
+                temp = rel.copy()
+                temp.remove(v)
+                possible_deductions[v].append(temp)
+            for rel in impl_index.get(v, []):
+                temp = rel.copy()
+                temp.remove(v)
+                possible_deductions[v].append(temp)
         return possible_deductions
 
     def update_variables_dictionary(self, varlist):
         for v in varlist:
             if v not in self.variables_dictionary.keys():
-                self.variables_dictionary[v] = Symbol(
-                    name=v, typename=types.BV1)
+                self.variables_dictionary[v] = Symbol(name=v, typename=types.BV1)
 
     def generate_initial_conditions(self):
         """
-        This method generates the initial constraints consisting of 
-        constrains corresponding to the maximum number of guessed, and 
+        This method generates the initial constraints consisting of
+        constrains corresponding to the maximum number of guessed, and
         known variables in the initial state
         """
 
-        initial_state_vars = ['%s_%d' % (
-            v, 0) for v in self.variables if v not in self.known_variables]
+        _known_set = set(self.known_variables)
+        initial_state_vars = [
+            step_var(v, 0) for v in self.variables if v not in _known_set
+        ]
         if initial_state_vars != []:
             self.update_variables_dictionary(initial_state_vars)
             bv_length = ceil(log2(len(initial_state_vars))) + 1
             sum = BV(0, width=bv_length)
             for iv in initial_state_vars:
-                sum = BVAdd(sum, BVZExt(
-                    self.variables_dictionary[iv], bv_length - 1))
+                sum = BVAdd(sum, BVZExt(self.variables_dictionary[iv], bv_length - 1))
             clause = BVULE(sum, BV(self.max_guess, width=bv_length))
             self.smt_solver.add_assertion(clause)
             # self.smt_formula = self.smt_formula.And(clause)
 
-        final_state_target_vars = ['%s_%d' % (
-            v, self.max_steps) for v in self.target_variables]
+        final_state_target_vars = [
+            step_var(v, self.max_steps) for v in self.target_variables
+        ]
         for fv in final_state_target_vars:
             clause = Equals(self.variables_dictionary[fv], BV(1, width=1))
             self.smt_solver.add_assertion(clause)
             # self.smt_formula = self.smt_formula.And(clause)
 
         for v in self.known_variables:
-            if v != '':
-                LHS = self.variables_dictionary[('%s_0' % v)]
+            if v != "":
+                LHS = self.variables_dictionary[step_var(v, 0)]
                 clause = Equals(LHS, BV(1, width=1))
                 self.smt_solver.add_assertion(clause)
                 # self.smt_formula = self.smt_formula.And(clause)
-            
+
         for v in self.notguessed_variables:
-            if v != '':
-                LHS = self.variables_dictionary[('%s_0' % v)]
+            if v != "":
+                LHS = self.variables_dictionary[step_var(v, 0)]
                 clause = Equals(LHS, BV(0, width=1))
                 self.smt_solver.add_assertion(clause)
 
     def generate_smt_constraints(self):
         """
-        This method generates the smt constraints corresponding to the 
+        This method generates the smt constraints corresponding to the
         obtained deductions
         """
 
         for step in range(self.max_steps):
             for v in self.variables:
-                v_new = '%s_%d' % (v, step + 1)
+                v_new = step_var(v, step + 1)
                 tau = len(self.deductions[v])
-                v_path_variables = ['%s_%d_%d' %
-                                    (v, step + 1, i) for i in range(tau)]
+                v_path_variables = [path_var(v, step + 1, i) for i in range(tau)]
                 self.update_variables_dictionary([v_new] + v_path_variables)
                 #####################################-State variable constraints-#####################################
                 ######################################################################################################
@@ -183,8 +261,9 @@ class ReduceGDtoSMT:
                 ######################################################################################################
                 ######################################################################################################
                 for i in range(0, tau):
-                    v_connected_variables = ['%s_%d' % (
-                        var, step) for var in self.deductions[v][i]]
+                    v_connected_variables = [
+                        step_var(var, step) for var in self.deductions[v][i]
+                    ]
                     self.update_variables_dictionary(v_connected_variables)
                     LHS = BV(1, width=1)
                     for vc in v_connected_variables:
@@ -201,17 +280,30 @@ class ReduceGDtoSMT:
         """
         This method makes the SMT model, and then write it into an smt file
         """
-        print('Generating the SMT model ...')
+        print("=" * 60)
+        print("SMT SOLVER — %s" % self.problem_name)
+        print("=" * 60)
+        print(
+            "Variables: %d | Relations: %d" % (self.num_of_vars, self.num_of_relations)
+        )
+        print("Max guess: %d | Max steps: %d" % (self.max_guess, self.max_steps))
+        print("Solver: %s" % self.smt_solver_name)
+        print("-" * 60)
+        print("MODEL GENERATION")
+        print("-" * 60)
         start_time = time.time()
         self.generate_smt_constraints()
         self.generate_initial_conditions()
-        self.smt_file_path = os.path.join(TEMP_DIR, 'smtmodel_mg%d_ms%d_%s.smt2' % (
-            self.max_guess, self.max_steps, self.rnd_string_tmp))
+        self.smt_file_path = os.path.join(
+            TEMP_DIR,
+            "smtmodel_mg%d_ms%d_%s.smt2"
+            % (self.max_guess, self.max_steps, self.rnd_string_tmp),
+        )
         # smtlib_format = self.smt_formula.to_smtlib(daggify=True)
-        # human_readable_formula = serialize(self.smt_formula)        
+        # human_readable_formula = serialize(self.smt_formula)
         elapsed_time = time.time() - start_time
         # write_smtlib(self.smt_formula, self.smt_file_path)
-        print('SMT model was generated after %0.2f seconds' % elapsed_time)
+        print("SMT model generated in %0.2f seconds" % elapsed_time)
 
     def solve_via_smtsolver(self):
         """
@@ -221,45 +313,60 @@ class ReduceGDtoSMT:
         # If you want to get the same solution in each single execution, chose a fixed value for the following parameter
         self.smt_solver.options.random_seed = random.randint(0, 1000)
         # self.smt_solver.options.random_seed = 1370
-        #         
-        print('Checking the satisfiability of the constructed SMT model using %s ...' % self.smt_solver_name)
+        #
+        print("-" * 60)
+        print("SOLVING")
+        print("-" * 60)
         start_time = time.time()
         ##########################
         ##########################
         if self.time_limit != -1:
-            print('Time limit is not currently supported by PySMT.')
+            print("Time limit is not currently supported by PySMT.")
             result = self.smt_solver.check_sat()
         else:
             result = self.smt_solver.check_sat()
-        #temp = read_smtlib(self.smt_file_path)
-        #result = is_sat(temp)
+        # temp = read_smtlib(self.smt_file_path)
+        # result = is_sat(temp)
         ##########################
         ##########################
         elapsed_time = time.time() - start_time
-        print('Checking was finished after %0.2f seconds' % elapsed_time)
-        #solver_info = self.smt_solver.get_info()
+        print("Solving finished in %0.2f seconds" % elapsed_time)
+        # solver_info = self.smt_solver.get_info()
         # print(solver_statistics)
         if result == True:
             # Extract the solution
             self.smt_solver_model = self.smt_solver.get_model()
-            self.solutions = [0]*(self.max_steps + 1)
+            self.solutions = [0] * (self.max_steps + 1)
             for step in range(self.max_steps + 1):
-                state_vars = ['%s_%d' % (v, step) for v in self.variables]
-                temp = list(
-                    map(lambda vx: self.variables_dictionary[vx], state_vars))
+                state_vars = [step_var(v, step) for v in self.variables]
+                temp = list(map(lambda vx: self.variables_dictionary[vx], state_vars))
                 state_values = list(
-                    map(lambda vx: self.smt_solver.get_py_value(vx), temp))
+                    map(lambda vx: self.smt_solver.get_py_value(vx), temp)
+                )
                 # state_values = list(map(lambda vx: self.smt_solver_model.get_py_value(vx), temp))
                 self.solutions[step] = dict(zip(state_vars, state_values))
             parse_solver_solution(self)
-            # draw_graph(self.vertices, self.edges, self.known_variables, self.guessed_vars,\
-            #      self.output_dir, self.tikz, self.dglayout)
+            if self.draw_graph:
+                draw_graph(
+                    self.vertices,
+                    self.edges,
+                    self.known_variables,
+                    self.guessed_vars,
+                    self.output_dir,
+                    self.tikz,
+                    self.dglayout,
+                )
             return True
         elif result == False:
-            print(
-                'The model is UNSAT!\nIncrease the max_guess, and max_steps paramters, and try again.')
+            print("\n" + "=" * 60)
+            print("RESULT: UNSATISFIABLE")
+            print("The model is UNSAT!")
+            print("Increase max_guess or max_steps and try again.")
+            print("=" * 60)
             return False
         else:
-            print(
-                'Solver could not find the solution\nI need more time! The solving process was interrupted before finding any solution.')
+            print("\n" + "=" * 60)
+            print("RESULT: TIMEOUT")
+            print("The solver was interrupted before finding any solution.")
+            print("=" * 60)
             return None

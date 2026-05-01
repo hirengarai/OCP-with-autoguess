@@ -56,7 +56,7 @@ relationfile = f"relations_{cipher_name}_{nbr_rounds}r.txt"
 outputfile = f"output_{cipher_name}_{nbr_rounds}r.txt"
 
 # Run Autoguess
-result = attacks.gd_attack(
+result = attacks.guess_and_determine_attack(
     KS,
     target_vars=known_vars,
     solver='cp',
