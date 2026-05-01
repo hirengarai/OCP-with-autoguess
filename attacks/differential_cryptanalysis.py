@@ -1,16 +1,13 @@
-import sys
 from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1] # differential_cryptanalysis.py -> attacks -> <ROOT>
-sys.path.insert(0, str(ROOT))
-
-from attacks.trail import DifferentialTrail
+from math import log2
+from attacks.attack_trace import DifferentialTrail
 import tools.model_constraints as model_constraints
 import tools.model_objective as model_objective
 import tools.milp_search as milp_search
 import tools.sat_search as sat_search
 import visualisations.visualisations as vis
 
+ROOT = Path(__file__).resolve().parents[1] # differential_cryptanalysis.py -> attacks -> <ROOT>
 FILES_DIR = ROOT / "files"
 FILES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -42,11 +39,15 @@ def parse_and_set_configs(cipher, goal, objective_target, config_model, config_s
 
     if config_model["model_type"] == "milp":
         # Set the model "filename".
-        config_model["filename"] = str(FILES_DIR / f"{cipher.name}_{goal}_{objective_target}_{config_solver['solver']}_model.lp")
+        config_model["filename"] = str(FILES_DIR / f"{cipher.nbr_rounds}round_{cipher.name}_{goal}_{objective_target}_milp_model.lp")
 
     elif config_model["model_type"] == "sat":
         # Set the model "filename".
-        config_model["filename"] = str(FILES_DIR / f"{cipher.name}_{goal}_{objective_target}_{config_solver['solver']}_model.cnf")
+        config_model["filename"] = str(FILES_DIR / f"{cipher.nbr_rounds}round_{cipher.name}_{goal}_{objective_target}_sat_model.cnf")
+
+    # Set solution_number to a large value if not defined when searching for differentials
+    if goal == "DIFFERENTIAL_PROB":
+        config_solver.setdefault("solution_number", 1000000)
 
     return config_model, config_solver
 
@@ -77,6 +78,53 @@ def gen_input_non_zero_constraints(cipher, goal, config_model): # Generate input
             binary_vars += (expand_var_ids(var, bitwise=bitwise))
         if binary_vars:
             constraints.append("Binary\n" + " ".join(binary_vars))
+    return constraints
+
+
+def gen_fixed_input_output_constraints(in_out, fix_diff, cipher, config_model):
+    cons_vars = []
+    if in_out == "input":
+        assert hasattr(cipher, "inputs") and isinstance(cipher.inputs, dict), "[WARNING] Cipher 'inputs' attribute invalid."
+        for input_name in cipher.inputs.keys():
+            cons_vars += cipher.inputs[input_name]
+    elif in_out == "output":
+        assert hasattr(cipher, "outputs") and isinstance(cipher.outputs, dict), "[WARNING] Cipher 'outputs' attribute invalid."
+        for output_name in cipher.outputs.keys():
+            cons_vars += cipher.outputs[output_name]
+    else:
+        raise ValueError(f"[WARNING] Invalid in_out: {in_out}. Expected 'input' or 'output'.")
+    n = len(cons_vars) * cons_vars[0].bitsize
+    s = fix_diff.strip().lower()
+    if s.startswith("0b"):
+        diff = s[2:].zfill(n)
+    elif s.startswith("0x"):
+        diff = bin(int(s, 16))[2:].zfill(n)
+    else:
+        raise ValueError(f"[WARNING] Invalid fix_diff format: {fix_diff}. Expected binary (0b...) or hexadecimal (0x...) string.")
+
+    model_type = config_model.get("model_type", "milp").lower()
+    constraints = []
+    if cons_vars[0].bitsize == 1:
+        for i in range(len(cons_vars)):
+            if model_type == "sat":
+                if diff[i] == '1':
+                    constraints.append(f"{cons_vars[i].ID}")
+                elif diff[i] == '0':
+                    constraints.append(f"-{cons_vars[i].ID}")
+            elif model_type == "milp":
+                constraints.append(f"{cons_vars[i].ID} = {diff[i]}")
+                constraints.append("Binary\n" + f"{cons_vars[i].ID}")
+        return constraints
+    for i in range(len(cons_vars)):
+        for j in range(cons_vars[i].bitsize):
+            if model_type == "sat":
+                if diff[i*cons_vars[i].bitsize+j] == '1':
+                    constraints.append(f"{cons_vars[i].ID}_{j}")
+                elif diff[i*cons_vars[i].bitsize+j] == '0':
+                    constraints.append(f"-{cons_vars[i].ID}_{j}")
+            elif model_type == "milp":
+                constraints.append(f"{cons_vars[i].ID}_{j} = {diff[i*cons_vars[i].bitsize+j]}")
+                constraints.append("Binary\n" + f"{cons_vars[i].ID}_{j}")
     return constraints
 
 
@@ -132,6 +180,17 @@ def search_diff_trail(cipher, goal="DIFFERENTIALPATH_PROB", constraints=["INPUT_
             model_cons += [cons]
     model_cons += round_constraints
 
+    # For the goal of searching for differentials, fix the input and output differences
+    if goal == "DIFFERENTIAL_PROB":
+        input_diff = config_model.get("input_diff", None)
+        output_diff = config_model.get("output_diff", None)
+        if input_diff == None and output_diff == None:
+            raise ValueError("For goal='DIFFERENTIAL_PROB', either input_diff or output_diff must be specified in config_model.")
+        if input_diff is not None:
+            model_cons += gen_fixed_input_output_constraints("input", input_diff, cipher, config_model)
+        if output_diff is not None:
+            model_cons += gen_fixed_input_output_constraints("output", output_diff, cipher, config_model)
+
     # Step 4: Modeling and Solving.
     if model_type == "milp":
         solutions = milp_search.modeling_solving_milp(objective_target, model_cons, obj_fun, config_model, config_solver)
@@ -151,25 +210,40 @@ def search_diff_trail(cipher, goal="DIFFERENTIALPATH_PROB", constraints=["INPUT_
 
     # Step 5: Extract and Visualize Trails from Solutions.
     if isinstance(solutions, list):
-        return extract_and_format_diff_trails(cipher, goal, config_model, show_mode, solutions)
+        return extract_and_format_diff_trails(cipher, goal, config_model, config_solver, show_mode, solutions)
 
     raise ValueError("[WARNING] No valid solutions found.")
 
 
 # -------------------- Trail Extraction and Visualization --------------------
-def extract_and_format_diff_trails(cipher, goal, config_model, show_mode, solutions):
+def extract_and_format_diff_trails(cipher, goal, config_model, config_solver, show_mode, solutions):
     trails = []
+    trail_structs = []
+    pr = 0
     for i, sol in enumerate(solutions):
         trail_struct = extract_trail_structures(cipher, goal, sol)
-        data = {"cipher": f"{cipher.functions['PERMUTATION'].nbr_rounds}_round_{cipher.name}", "functions": config_model["functions"], "rounds": config_model["rounds"], "trail_struct": trail_struct, "diff_weight": sol.get("obj_fun_value"), "rounds_diff_weight": sol.get("rounds_obj_fun_values")}
+        if trail_struct in trail_structs:
+            continue
+        trail_structs.append(trail_struct)
+        data = {"cipher": f"{cipher.functions['PERMUTATION'].nbr_rounds}_round_{cipher.name}",
+                "functions": config_model["functions"],
+                "rounds": config_model["rounds"],
+                "config_model": config_model,
+                "config_solver": config_solver,
+                "trail_struct": trail_struct,
+                "diff_weight": sol.get("obj_fun_value"),
+                "rounds_diff_weight": sol.get("rounds_obj_fun_values")}
         trail = DifferentialTrail(data, solution_trace=sol)
         if i > 0:
             print(f"[INFO] Saving the {i+1}-th Trail.")
             trail.json_filename = trail.json_filename.replace(".json", f"_{i}.json") if trail.json_filename else str(FILES_DIR / f"{trail.data['cipher']}_trail_{i}.json")
             trail.txt_filename = trail.txt_filename.replace(".txt", f"_{i}.txt") if trail.txt_filename else str(FILES_DIR / f"{trail.data['cipher']}_trail_{i}.txt")
         trail.save_json()
-        trail.save_trail_txt(show_mode=show_mode)  # Print the trail in a human-readable format and save it to a file.
+        trail.save_txt(show_mode=show_mode)  # Print the trail in a human-readable format and save it to a file.
         trails.append(trail)
+        pr += 2 ** ( - trail.data['diff_weight'] ) if trail.data['diff_weight'] is not None else 0
+    if solutions and goal == "DIFFERENTIAL_PROB":
+        print(f"[INFO] Total probability of all {len(trails)} found trails: 2^{log2(pr) if pr > 0 else 'undefined'}")
     return trails
 
 def extract_trail_structures(cipher, goal, solution):
@@ -219,6 +293,7 @@ def extract_trail_structures(cipher, goal, solution):
     # ------------------------------ Functions / Rounds / Layers ------------------------------
     for fun in cipher.functions:
         fun_store = {
+        "rounds": list(range(1, cipher.functions[fun].nbr_rounds + 1)),
         "nbr_words": cipher.functions[fun].nbr_words if hasattr(cipher.functions[fun], "nbr_words") else None,
         "nbr_temp_words": cipher.functions[fun].nbr_temp_words if hasattr(cipher.functions[fun], "nbr_temp_words") else None
         }

@@ -1,3 +1,12 @@
+import ast
+import os
+import sys
+import time
+import re
+import platform
+from tools.minimize_logic import ttb_to_ineq_logic
+from tools.polyhedron import ttb_to_ineq_convex_hull
+from itertools import combinations
 try:
     from pysat.card import CardEnc
     from pysat.formula import IDPool
@@ -62,13 +71,17 @@ def configure_model_version(cipher, goal, config_model): # Configure the model v
         set_model_versions(cipher, "LINEAR", functions, rounds, layers, positions) # Set model_version = "LINEAR" for all operators
         set_model_versions(cipher, "LINEAR_A", functions, rounds, layers, positions, operator_name="Sbox") # Set model_version = "LINEAR_A" for all Sbox operators
 
-    elif goal == 'LINEARPATH_PROB' or goal == "LINEARHULL_PROB":
+    elif goal == 'LINEARPATH_CORR' or goal == "LINEARHULL_CORR":
         set_model_versions(cipher, "LINEAR", functions, rounds, layers, positions) # Set model_version = "LINEAR" for all operators
         set_model_versions(cipher, "LINEAR_PR", functions, rounds, layers, positions, operator_name="Sbox") # Set model_version = "LINEAR_PR" for all Sbox operators
 
     elif goal == "TRUNCATEDDIFF_SBOXCOUNT":
         set_model_versions(cipher, "TRUNCATEDDIFF", functions, rounds, layers, positions) # Set model_version = "TRUNCATEDDIFF" for all operators
         set_model_versions(cipher, "TRUNCATEDDIFF_A", functions, rounds, layers, positions, operator_name="Sbox") # Set model_version = "TRUNCATEDDIFF_A" for all Sbox operators
+
+    elif goal == "TRUNCATEDLINEAR_SBOXCOUNT":
+        set_model_versions(cipher, "TRUNCATEDLINEAR", functions, rounds, layers, positions) # Set model_version = "TRUNCATEDLINEAR" for all operators
+        set_model_versions(cipher, "TRUNCATEDLINEAR_A", functions, rounds, layers, positions, operator_name="Sbox") # Set model_version = "TRUNCATEDLINEAR_A" for all Sbox operators
 
     else:
         raise ValueError(f"Invalid goal: {goal}.")
@@ -396,3 +409,294 @@ def gen_matsui_partial_cardinality_sat(obj_var, dummy_var, k, left, right, m): #
             add_cons.append(f"-{obj_var[i]}")
 
     return add_cons
+
+
+def gen_xor_constraints(vin1, vin2, vout, model_type, v_dummy=None, version=0):
+    # Constraint for bitwise xor: vin1 ^ vin2 = vout. Valid patterns for (vin1, vin2, vout): (0,0,0), (0,1,1), (1,0,1), (1,1,0)
+    assert isinstance(vin1, str) and isinstance(vin2, str) and isinstance(vout, str), "[WARNING] Input and output variables must be strings."
+    if model_type == "sat":
+        if version == 0:
+            return [f'{vin1} {vin2} -{vout}', f'{vin1} -{vin2} {vout}', f'-{vin1} {vin2} {vout}', f'-{vin1} -{vin2} -{vout}']
+        else:
+            raise ValueError(f"[WARNING] Unknown version {version} for XOR in SAT.")
+    elif model_type == 'milp':
+        if version == 0:
+            return [f'{vin1} + {vin2} - {vout} >= 0',
+                    f'{vin2} + {vout} - {vin1} >= 0',
+                    f'{vin1} + {vout} - {vin2} >= 0',
+                    f'{vin1} + {vin2} + {vout} <= 2',
+                    'Binary\n' + ' '.join([vin1, vin2, vout])]
+        elif version == 1:
+            assert isinstance(v_dummy, str), "[WARNING] v_dummy must be provided as a string for XOR in MILP version 1."
+            return [f'{vin1} + {vin2} + {vout} - 2 {v_dummy} >= 0',
+                    f'{vin1} + {vin2} + {vout} <= 2',
+                    f'{v_dummy} - {vin1} >= 0',
+                    f'{v_dummy} - {vin2} >= 0',
+                    f'{v_dummy} - {vout} >= 0',
+                    'Binary\n' + ' '.join([vin1, vin2, vout, v_dummy])]
+        elif version == 2:
+            assert isinstance(v_dummy, str), "[WARNING] v_dummy must be provided as a string for XOR in MILP version 2."
+            return [f'{vin1} + {vin2} + {vout} - 2 {v_dummy} = 0',
+                    'Binary\n' + ' '.join([vin1, vin2, vout, v_dummy])]
+        else:
+            raise ValueError(f"[WARNING] Unknown version {version} for XOR in MILP.")
+    else:
+        raise ValueError(f"[WARNING] Unknown model type {model_type} for XOR.")
+
+def gen_word_xor_constraints(vin1, vin2, vout, model_type, v_dummy=None, version=0):
+    # Constraint for wordwise xor: vin1 ^ vin2 = vout. Valid patterns for (vin1, vin2, vout): (0,0,0), (0,1,1), (1,0,1), (1,1,0), (1,1,1)
+    assert isinstance(vin1, str) and isinstance(vin2, str) and isinstance(vout, str), "[WARNING] Input and output variables must be strings."
+    if model_type == "sat":
+        if version == 0:
+            return [f'{vin1} {vin2} -{vout}',
+                    f'{vin1} -{vin2} {vout}',
+                    f'-{vin1} {vin2} {vout}']
+        else:
+            raise ValueError(f"[WARNING] Unknown version {version} for Word-wise XOR in SAT.")
+    if model_type == 'milp':
+        if version == 0:
+            return [f'{vin1} + {vin2} - {vout} >= 0',
+                    f'{vin2} + {vout} - {vin1} >= 0',
+                    f'{vin1} + {vout} - {vin2} >= 0',
+                    'Binary\n' + ' '.join([vin1, vin2, vout])]
+        elif version == 1:
+            assert isinstance(v_dummy, str), "[WARNING] v_dummy must be provided as a string for Word-wise XOR in MILP version 1."
+            return [f'{vin1} + {vin2} + {vout} - 2 {v_dummy} >= 0',
+                    f'{v_dummy} - {vin1} >= 0',
+                    f'{v_dummy} - {vin2} >= 0',
+                    f'{v_dummy} - {vout} >= 0',
+                    'Binary\n' + ' '.join([vin1, vin2, vout, v_dummy])]
+        else:
+            raise ValueError(f"[WARNING] Unknown version {version} for Word-wise XOR in MILP.")
+    else:
+        raise ValueError(f"[WARNING] Unknown model type {model_type} for Word-wise XOR.")
+
+
+def gen_nxor_constraints(vin, vout, model_type, v_dummy=None, version=0):
+    # Constraint for n-ary bitwise nxor: vin1 ^ vin2 ^ ... ^ vinn = vout.
+    assert isinstance(vin, list) and isinstance(vout, str) and all(isinstance(v, str) for v in vin), "[WARNING] Input and output variables must be strings."
+    constraints = []
+    if model_type == "sat":
+        for k in range(0, len(vin) + 1):  # All subsets (0 to n elements)
+            for comb in combinations(vin, k):
+                is_odd_parity = (len(comb) % 2 == 1)
+                clause = [f"{vout}" if is_odd_parity else f"-{vout}"]
+                clause += [f"-{v}" if v in comb else f"{v}" for v in vin]
+                constraints.append(" ".join(clause))
+        return constraints
+    elif model_type == "milp":
+        if version == 0:
+            assert isinstance(v_dummy, str), "[WARNING] dummy must be provided as a string for n-XOR in MILP version 0."
+            constraints += [" + ".join(v for v in (vin)) + " + " + vout + f" - 2 {v_dummy} = 0"]
+            constraints += [f"{v_dummy} >= 0"]
+            constraints += [f"{v_dummy} <= {int((len(vin)+1)/2)}"]
+            constraints.append('Binary\n' + ' '.join(vin + [vout]))
+            constraints.append('Integer\n' + v_dummy)
+            return constraints
+        elif version == 1: # Reference: MILP-aided cryptanalysis of the future block cipher.
+            assert isinstance(v_dummy, list), "[WARNING] v_dummy must be provided as a list of strings for n-XOR in MILP version 1."
+            s = " + ".join(vin) + f" + {vout} - {2 * len(v_dummy)} {v_dummy[0]}"
+            s += " - " + " - ".join(f"{2 * (len(v_dummy) - j)} {v_dummy[j]}" for j in range(1, len(v_dummy))) if len(v_dummy) > 1 else ""
+            s += " = 0"
+            return [s, 'Binary\n' + ' '.join(vin + [vout] + v_dummy)]
+        else:
+            raise ValueError(f"[WARNING] Unknown version {version} for n-XOR in MILP.")
+    else:
+        raise ValueError(f"[WARNING] Unknown model type {model_type} for n-XOR.")
+
+def gen_word_nxor_constraints(vin, vout, model_type, v_dummy=None, version=0):
+    constraints = []
+    if model_type == "milp": # Reference: Related-Key Differential Analysis of the AES.
+        constraints += [f"{' + '.join(vin)} - {vout} >= 0"]
+        for k, ik in enumerate(vin):
+            others = [x for j, x in enumerate(vin) if j != k]
+            constraints.append(f"{' + '.join(others)} + {vout} - {ik} >= 0")
+        constraints.append('Binary\n' +  ' '.join(vin + [vout]))
+        return constraints
+    elif model_type == "sat":
+        constraints.append(" ".join([f"-{vout}"] + list(vin)))
+        for k, ik in enumerate(vin):
+            others = [x for j, x in enumerate(vin) if j != k]
+            constraints.append(f"{' '.join(others)} {vout} -{ik}")
+        return constraints
+    else:
+        raise ValueError(f"[WARNING] Unknown model type {model_type} for word-wise n-ary XOR.")
+
+def gen_matrix_constraints(vin, vout, model_type, v_dummy=None):
+    assert isinstance(vin, list), "Input variables should be provided as a list in matrix_constraints."
+    assert isinstance(vout, str), "Output variable should be provided as a string in matrix_constraints."
+    if len(vin) == 1:
+        if model_type == 'milp':
+            return [f"{vout} - {vin[0]} = 0", "Binary\n" + vin[0] + " " + vout]
+        elif model_type == 'sat':
+            return [f"{vin[0]} -{vout}", f"-{vin[0]} {vout}"]
+    elif len(vin) == 2:
+        return gen_xor_constraints(vin[0], vin[1], vout, model_type)
+    elif len(vin) >= 3:
+        if model_type == 'milp':
+            assert isinstance(v_dummy, str), "Dummy variables must be provided for MILP model with more than 2 inputs."
+        return gen_nxor_constraints(vin, vout, model_type, v_dummy=v_dummy)
+    else:
+        raise ValueError(f"[WARNING] Unknown model type {model_type} for Matrix.")
+
+def gen_word_matrix_constraints(vin, vout, model_type, v_dummy=None):
+    assert isinstance(vin, list), "Input variables should be provided as a list in word_matrix_constraints."
+    assert isinstance(vout, str), "Output variable should be provided as a string in word_matrix_constraints."
+    if len(vin) == 1:
+        if model_type == 'milp':
+            return [f"{vout} - {vin[0]} = 0", "Binary\n" + vin[0] + " " + vout]
+        elif model_type == 'sat':
+            return [f"{vin[0]} -{vout}", f"-{vin[0]} {vout}"]
+    elif len(vin) == 2:
+        return gen_word_xor_constraints(vin[0], vin[1], vout, model_type)
+    elif len(vin) >= 3:
+        return gen_word_nxor_constraints(vin, vout, model_type)
+    else:
+        raise ValueError(f"[WARNING] Unknown model type {model_type} for Matrix.")
+
+
+# ---------------- Common utilities in SAT and MILP modeling ---------------- #
+def generate_and_save_constraints(model_type, tool_type, mode, ttable, input_variables, output_variables, weight_variables=None, objective_fun=None, model_filename=None):
+    """
+    Generate template constraints/objective function and save them to self.model_filename.
+
+    Returns:
+        tuple[list[str], str]: (constraints, objective_fun)
+    """
+    variables = input_variables + output_variables + weight_variables if weight_variables else input_variables + output_variables
+    time_start = time.time()
+    if model_type == "milp":
+        assert tool_type in ["minimize_logic", "minimize_logic_espresso", "polyhedron"], f"Unsupported tool type {tool_type} for MILP model."
+    elif model_type == "sat":
+        assert tool_type in ["minimize_logic", "minimize_logic_espresso"], f"Unsupported tool type {tool_type} for SAT model."
+    else:
+        raise ValueError(f"unknown model type {model_type}")
+
+    if tool_type == "minimize_logic" or tool_type == "minimize_logic_espresso":
+        inequalities, information = ttb_to_ineq_logic(ttable, variables, mode=mode, tool_type=tool_type)
+
+    elif tool_type == "polyhedron": # Generate inequalities from the truth table using Convex Hull
+        inequalities, information = ttb_to_ineq_convex_hull(ttable, variables)
+    else:
+        raise ValueError(f"unknown tool type {tool_type}")
+
+    if model_type == 'milp': # Generate MILP constraints from inequalities
+        constraints = [inequality_to_constraint_milp(ineq, variables) for ineq in inequalities]
+        num_cons = len(constraints)
+        constraints.append('Binary\n' + ' '.join(variables))
+    elif model_type == 'sat':  # Generate SAT constraints from inequalities
+        constraints = [inequality_to_constraint_sat(ineq, variables) for ineq in inequalities]
+        num_cons = len(constraints)
+    else:
+        raise ValueError(f"unknown model type {model_type}")
+
+    time_used = time.time() - time_start
+    if model_filename is not None:
+        with open(model_filename, "w", encoding="utf-8") as file:
+            file.write(f"Input: {'||'.join(input_variables)}; msb: {input_variables[0]}\n")
+            file.write(f"Output: {'||'.join(output_variables)}; msb: {output_variables[0]}\n")
+            file.write(f"Time used to simplify the constraints: {time_used:.4f} s\n")
+            file.write(f"Number of constraints: {num_cons}\n")
+            file.write(f"Constraints: {constraints}\n")
+            if objective_fun:
+                file.write(f"Weight: {objective_fun}\n")
+            file.write(f"\n\nInformation\n")
+            for key, value in information.items():
+                file.write(f"{key}: {value}\n")
+            file.write(f"Model type: {model_type}\n")
+            file.write(f"Tool type: {tool_type}\n")
+            file.write(f"Python version: {sys.version.split()[0]}\n")
+            file.write(f"Platform: {platform.platform()}\n")
+
+def load_constraints_template(filename):
+    """
+    Load template constraints/objective function from file.
+
+    Returns:
+        tuple[list[str] | None, str | None]: (constraints, objective_fun)
+    """
+    constraints, objective_fun = None, None
+    if not os.path.exists(filename):
+        return None, None
+    with open(filename, "r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if line.startswith("Constraints:"):
+                constraints_str = line.split(":", 1)[1].strip()
+                try:
+                    constraints = ast.literal_eval(constraints_str)
+                except (SyntaxError, ValueError) as e:
+                    raise ValueError(f"Failed to parse constraints from {filename}: {constraints_str}") from e
+            elif line.startswith("Weight:"):
+                objective_fun = line.split(":", 1)[1].strip()
+    return constraints, objective_fun
+
+def gen_constraints_obj_func_from_template(filename, var_in, var_out, var_p=None):
+    """
+    Load template constraints/objective function from file, then instantiate them by replacing template variables:
+        a0, a1, ... -> var_in[i]
+        b0, b1, ... -> var_out[i]
+        p0, p1, ... -> var_p[i] (optional)
+
+    Returns:
+        tuple[list[str], str]: (mapped_constraints, mapped_objective_fun)
+    """
+    constraints, objective_fun = load_constraints_template(filename)
+
+    if constraints is None:
+        raise ValueError(f"Failed to load constraints or objective function from {filename}.")
+
+    def replace_vars(expr, prefix, repl_vars):
+        if repl_vars is None:
+            return expr
+        for i, var in enumerate(repl_vars):
+            expr = re.sub(rf"\b{prefix}{i}\b", str(var), expr)
+        return expr
+
+    mapped_constraints = []
+    for con in constraints:
+        con_map = con
+        con_map = replace_vars(con_map, "a", var_in)
+        con_map = replace_vars(con_map, "b", var_out)
+        con_map = replace_vars(con_map, "p", var_p)
+        mapped_constraints.append(con_map)
+
+    mapped_objective_fun = objective_fun
+    mapped_objective_fun = replace_vars(mapped_objective_fun, "p", var_p)
+
+    return mapped_constraints, mapped_objective_fun
+
+
+def inequality_to_constraint_sat(inequality, variables): # Convert an inequality (coefficients + RHS) into the constraint into SAT format.
+    """
+    Example:
+        inequality = [1, -1, 0, -1, -1], variables = ['x1', 'x2', 'x3', 'x4']
+        Return: 'x1 -x2 -x4'
+    """
+    terms = []
+    for coeff, var in zip(inequality[:-1], variables):
+        if coeff == 1:
+            terms.append(f"{var}")
+        elif coeff == -1:
+            terms.append(f"-{var}")
+        # coeff == 0 → variable not used
+    return " ".join(terms).strip()
+
+
+def inequality_to_constraint_milp(inequality, variables): #  Convert an inequality (coefficients + RHS) into the constraint into MILP format.
+    """
+    Example:
+        ineq = [1, -1, 0, -1, -1], variables = ['x1', 'x2', 'x3', 'x4']
+        Return: 'x1 - x2 - x4 >= -1'
+    """
+    terms = []
+    rhs = inequality[-1]
+    for coeff, var in zip(inequality[:-1], variables):
+        sign = '+' if coeff > 0 else '-'
+        abs_coeff = abs(coeff)
+        if abs_coeff == 1:
+            terms.append(f"{sign} {var}")
+        elif abs_coeff > 0:
+            terms.append(f"{sign} {abs_coeff} {var}")
+        # coeff == 0 → variable not used
+    return " ".join(terms).lstrip('+ ').strip() + f" >= {rhs}"

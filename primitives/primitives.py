@@ -22,9 +22,9 @@ class Layered_Function:
         self.nbr_words = nbr_words            # number of words in that function
         self.nbr_temp_words = nbr_temp_words  # number of temporary words in that function
         self.word_bitsize = word_bitsize      # number of bits per word in that function
-        self.vars = []
-        self.constraints = []
-
+        self.vars = []                        # list of variables for that function                        
+        self.constraints = []                 # list of constraints for that function
+        
         # list of variables for that function (indexed with vars[r][l][n] where r is the round number, l the layer number, n the word number)
         self.vars = [[[] for i in range(nbr_layers+1)] for j in range(nbr_rounds+1)]
 
@@ -39,7 +39,7 @@ class Layered_Function:
         # create initial constraints
         for i in range(0,nbr_rounds):
             self.constraints[i][nbr_layers] = [op.Equal([self.vars[i][nbr_layers][j]], [self.vars[i+1][0][j]], ID=generateID('LINK_EQ_' + label,i,nbr_layers+1,j)) for j in range(nbr_words + nbr_temp_words)]
-
+        
     def display(self, representation='binary'):   # method that displays in details the function
         print("Name: " + str(self.name), " / nbr_words: " + str(self.nbr_words), " / word_bitsize: " + str(self.word_bitsize))
         print("Vars: [" + str([ len(self.vars[i]) for i in range(len(self.vars))])   + "]")
@@ -105,7 +105,7 @@ class Layered_Function:
         if len(permutation)<(self.nbr_words + self.nbr_temp_words): permutation = permutation + [i for i in range(len(permutation), self.nbr_words + self.nbr_temp_words)]
         for j in range(len(permutation)):
             in_var, out_var = self.vars[crt_round][crt_layer][permutation[j]], self.vars[crt_round][crt_layer+1][j]
-            self.constraints[crt_round][crt_layer].append(op.Equal([in_var], [out_var], simple_connect=False, ID=generateID(name + "_EQ",crt_round,crt_layer+1,j)))
+            self.constraints[crt_round][crt_layer].append(op.Equal([in_var], [out_var], ID=generateID(name + "_EQ",crt_round,crt_layer+1,j)))
 
     # apply a layer "name" of Rotation, at the round "crt_round", at the layer "crt_layer". Each rot is a list of rotation executions, each execution is composed of three elements plus an optional fourth: [direction, amount, index_in, (index_out)]. A rotation execution will take the word of the state located at position "index_in", apply the rotation direction "direction" and amount "amount" and place it in state located at position "index_out" (if defined, "index_in" otherwise). The state words receiving no rotation are applied identity.
     def RotationLayer(self, name, crt_round, crt_layer, rot):
@@ -138,7 +138,7 @@ class Layered_Function:
     def AddIdentityLayer(self, name, crt_round, crt_layer):
         for j in range(self.nbr_words + self.nbr_temp_words):
             in_var, out_var = self.vars[crt_round][crt_layer][j], self.vars[crt_round][crt_layer+1][j]
-            self.constraints[crt_round][crt_layer].append(op.Equal([in_var], [out_var], simple_connect=False, ID=generateID(name + "_EQ",crt_round,crt_layer+1,j)))
+            self.constraints[crt_round][crt_layer].append(op.Equal([in_var], [out_var], ID=generateID(name + "_EQ",crt_round,crt_layer+1,j)))
 
     # apply a layer "name" of a Constant addition, at the round "crt_round", at the layer "crt_layer", with the adding "add_type" and the constant value "constant".
     def AddConstantLayer(self, name, crt_round, crt_layer, add_type, constant, constant_table, modulo=None):
@@ -202,10 +202,11 @@ class Layered_Function:
     def ExtractionLayer(self, name, crt_round, crt_layer, extraction_indexes, external_variable):
         for j, indexes in enumerate(extraction_indexes):
             in_var, out_var = external_variable[indexes], self.vars[crt_round][crt_layer+1][j]
-            self.constraints[crt_round][crt_layer].append(op.Equal([in_var], [out_var], simple_connect=False, ID=generateID(name + "_EQ",crt_round,crt_layer+1,j)))
+            self.constraints[crt_round][crt_layer].append(op.Equal([in_var], [out_var],ID=generateID(name + "_EQ",crt_round,crt_layer+1,j)))
 
     # apply a layer "name" of an AddRoundKeyLayer addition, at the round "crt_round", at the layer "crt_layer", with the adding operator "my_operator". Only the positions where mask=1 will have the AddRoundKey applied, the rest being just identity
     def AddRoundKeyLayer(self, name, crt_round, crt_layer, my_operator, sk_function, mask = None):
+        if mask is None: mask = [1]*sk_function.nbr_words
         if sum(mask)!=sk_function.nbr_words: raise Exception("AddRoundKeyLayer: subkey size does not match the mask")
         if len(mask)<(self.nbr_words + self.nbr_temp_words): mask += [0]*(self.nbr_words + self.nbr_temp_words - len(mask))
         cpt = 0
@@ -231,8 +232,33 @@ class Primitive(ABC):
         self.functions = []             # list of functions used by the primitive
         self.inputs_constraints = []    # constraints linking the primitive inputs to the functions input variables
         self.outputs_constraints = []   # constraints linking the primitive outputs to the functions output variables
-        self.copy_constraints = []      # constraints for all the copy operators
         self.test_vectors = []
+        self.vars_dictionary = {}             # dictionary of the variables of all the functions in that primitive, indexed by their ID   
+        self.constraints_dictionary = {}      # dictionary of the constraints of all the functions in that primitive, indexed by their ID
+
+    # method that performs various operations after the primitive has been fully defined
+    def post_initialization(self, copy_operator=False):
+        self.clean_graph()
+        if copy_operator: self.add_copy_operators()
+        self.build_dictionaries()  
+
+    # method that builds the variables and constraints dictionaries
+    def build_dictionaries(self):
+        self.vars_dictionary = {}
+        self.constraints_dictionary = {}
+        for f in self.functions.values():       # for all functions of the primitive
+            for r in range(f.nbr_rounds+1):       # for all the rounds
+                for l in range(f.nbr_layers+1):   # for all the layers
+                    for v in f.vars[r][l]:      # for all variables in that function
+                        self.vars_dictionary[v.ID] = v
+                        for v_copy in v.copied_vars:
+                            self.vars_dictionary[v_copy[0].ID] = v_copy[0]
+                    for n in range(len(f.constraints[r][l])):   # for all constraints in that function
+                        self.constraints_dictionary[f.constraints[r][l][n].ID] = f.constraints[r][l][n]
+        for n in range(len(self.inputs_constraints)):
+            self.constraints_dictionary[self.inputs_constraints[n].ID] = self.inputs_constraints[n]
+        for n in range(len(self.outputs_constraints)):
+            self.constraints_dictionary[self.outputs_constraints[n].ID] = self.outputs_constraints[n]   
 
     # method that cleans the graph from dead-end variables linked only to Equal operators
     def clean_graph(self):
@@ -272,7 +298,7 @@ class Primitive(ABC):
             if self.outputs_constraints[n].is_ghost:
                 self.outputs_constraints[n] = op.NoneOperator(input_vars=self.outputs_constraints[n].input_vars, output_vars=self.outputs_constraints[n].output_vars, ID="NONE_OUTPUT_" + str(n))  # replace the ghost operator by a NoneOperator
 
-    # method that add the copy operators where needed in the graph
+    # method that add the copy operators where needed in the graph (if function_list is specified, only add copy operators in these functions)
     def add_copy_operators(self, functions_list=None):
         if functions_list is None:
             functions_list = self.functions.values()
@@ -289,36 +315,42 @@ class Primitive(ABC):
                                     added_operators.append(opop)
                                     connected_vars_with_unique_operator.append((vv,opop,direction))
 
-                        # if more than one unique operator is connected to that variable, then we need copy operators
+                        # if more than one unique operator is connected to that variable (as an input), then we need copy operators
                         if len(connected_vars_with_unique_operator)>1:
-                            #if there is a direct Equal operator, in connected_vars_with_unique_operator, put it on first position
+                            
+                            #if there is a direct Equal operator in connected_vars_with_unique_operator, put it on first position
                             for i in range(1,len(connected_vars_with_unique_operator)):
                                 if connected_vars_with_unique_operator[i][1].__class__.__name__=="Equal":
-                                    if connected_vars_with_unique_operator[i][1].simple_connect==True:
-                                        connected_vars_with_unique_operator[0], connected_vars_with_unique_operator[i] = connected_vars_with_unique_operator[i], connected_vars_with_unique_operator[0]
+                                    connected_vars_with_unique_operator[0], connected_vars_with_unique_operator[i] = connected_vars_with_unique_operator[i], connected_vars_with_unique_operator[0]
                                     break
-                            for i in range(1, len(connected_vars_with_unique_operator)):
-                                (vv, opop, direction) = connected_vars_with_unique_operator[i]
-                                v_new = var.Variable(v.bitsize, ID=v.ID + "_COPY_" + str(i))
-                                op_new = op.CopyOperator([v], [v_new], ID= "COPY_" + v.ID + "_" + opop.ID)
-                                self.copy_constraints.append(op_new)      # save this new operator in the copy operator list
-                                v.copied_vars.append((v_new, op_new))     # save these new variables and operators
-                                for v_index in range(len(opop.input_vars)): # update the input of the operator with the new variable
-                                    if opop.input_vars[v_index]==vv: opop.input_vars[v_index] = v_new
 
-                                ## remove vv from connected vars in v
+                            # create new variables and the copy operator
+                            v_new = [var.Variable(v.bitsize, ID=v.ID + "_COPY_" + str(i), copyorigin=v) for i in range(len(connected_vars_with_unique_operator))] 
+                            op_new = op.CopyOperator([v], v_new, ID= "COPYOPERATOR_" + v.ID)
+                            f.constraints[r][l].append(op_new)      # save this new operator in the operator list
+                            for i in range(len(connected_vars_with_unique_operator)):
+                                v.copied_vars.append((v_new[i], connected_vars_with_unique_operator[i][1], op_new))     # save these new variables and operators
+                                
+                            # update the graph connections    
+                            for i in range(len(connected_vars_with_unique_operator)):
+                                (vv, opop, direction) = connected_vars_with_unique_operator[i]
+                                for v_index in range(len(opop.input_vars)): # update the input of the operator with the new variable
+                                    if opop.input_vars[v_index]==v: opop.input_vars[v_index] = v_new[i]
+
+                                ## remove v from connected vars in vv
                                 index = vv.connected_vars.index((v, opop, "out"))
                                 vv.connected_vars.pop(index)
 
-                                ## remove v from connected vars in vv
+                                ## remove vv from connected vars in v
                                 index = v.connected_vars.index((vv, opop, "in"))
                                 v.connected_vars.pop(index)
 
-                                ## add v_new in connected vars of vv
-                                vv.connected_vars.append((v_new, opop, "out"))
+                                ## add v_new[i] in connected vars of vv
+                                vv.connected_vars.append((v_new[i], opop, "out"))
 
-                                ## add vv in connected vars of v_new
-                                v_new.connected_vars.append((vv, opop, "in"))
+                                ## add vv in connected vars of v_new[i]
+                                v_new[i].connected_vars.append((vv, opop, "in"))
+
 
 
 # ********************************************** FUNCTIONS **********************************************
@@ -338,13 +370,12 @@ class Function(Primitive):
         for i in range(len(s_input)): self.inputs_constraints.append(op.Equal([s_input[i]], [self.functions["FUNCTION"].vars[1][0][i]], ID='IN_LINK_EQ_'+str(i)))
 
         if len(s_output)!=nbr_words_output: raise Exception("Function: the number of output words does not match the number of output words in function")
-        for i in range(len(s_output)): self.outputs_constraints.append(op.Equal([self.functions["FUNCTION"].vars[nbr_rounds][nbr_layers][i]], [s_output[i]], ID='OUT_LINK_EQ_'+str(i)))
-
+        for i in range(len(s_output)): self.outputs_constraints.append(op.Equal([self.functions["FUNCTION"].vars[nbr_rounds][nbr_layers][i]], [s_output[i]], ID='OUT_LINK_EQ_'+str(i)))      
+        
 
 # ********************************************** PERMUTATIONS **********************************************
 # Subclass that represents a permutation object
 # A permutation is composed of a single function
-
 class Permutation(Primitive):
     def __init__(self, name, s_input, s_output, nbr_rounds, config):
         super().__init__(name, {"IN_":s_input}, {"OUT_":s_output})
@@ -388,3 +419,31 @@ class Block_cipher(Primitive):
         for i in range(len(c_output)): self.outputs_constraints.append(op.Equal([self.functions["PERMUTATION"].vars[nbr_rounds][s_nbr_layers][i]], [c_output[i]], ID='OUT_LINK_C_EQ_'+str(i)))
 
 
+
+# ********************************************** STREAM CIPHERS **********************************************
+# Subclass that represents a stream cipher object
+# A stream cipher is composed of three functions: a initialization function (to initialize the internal state), a state update function (to update the internal state), and a keystream generation function (to generate the keystream from the internal state)
+
+class Stream_cipher(Primitive):
+    def __init__(self, name, iv_input, k_input, keystream_output, nbr_rounds_init, nbr_rounds_update, nbr_rounds_keystream, init_config, update_config, keystream_config):
+        super().__init__(name, {"IV":iv_input, "key":k_input}, {"keystream":keystream_output})
+        init_nbr_layers, init_nbr_words, init_nbr_temp_words, init_word_bitsize = init_config[0], init_config[1], init_config[2], init_config[3]
+        update_nbr_layers, update_nbr_words, update_nbr_temp_words, update_word_bitsize = update_config[0], update_config[1], update_config[2], update_config[3]
+        keystream_nbr_layers, keystream_nbr_words, keystream_nbr_temp_words, keystream_word_bitsize = keystream_config[0], keystream_config[1], keystream_config[2], keystream_config[3]
+        self.nbr_rounds_init = nbr_rounds_init
+        self.nbr_rounds_update = nbr_rounds_update
+        self.nbr_rounds_keystream = nbr_rounds_keystream
+        self.functions = {"INITIALIZATION": Layered_Function("INITIALIZATION", 'init', nbr_rounds_init, init_nbr_layers, init_nbr_words, init_nbr_temp_words, init_word_bitsize), "STATE_UPDATE": Layered_Function("STATE_UPDATE", 'upd', nbr_rounds_update, update_nbr_layers, update_nbr_words, update_nbr_temp_words, update_word_bitsize), "KEYSTREAM_GEN": Layered_Function("KEYSTREAM_GEN", 'ks', nbr_rounds_keystream, keystream_nbr_layers, keystream_nbr_words, keystream_nbr_temp_words, keystream_word_bitsize)}
+        self.functions_implementation_order = ["INITIALIZATION", "STATE_UPDATE", "KEYSTREAM_GEN"]
+        self.functions_display_order = ["INITIALIZATION", "STATE_UPDATE", "KEYSTREAM_GEN"]
+
+        if (len(iv_input)!=init_nbr_words) or (len(k_input)!=init_nbr_words): raise Exception("Stream_cipher: the number of input IV/key words does not match the number of IV/key words in initialization function")
+
+        if len(iv_input)!=init_nbr_words: raise Exception("Stream_cipher: the number of IV words does not match the number of words in the initialization function")
+        for i in range(len(iv_input)): self.inputs_constraints.append(op.Equal([iv_input[i]], [self.functions["INITIALIZATION"].vars[1][0][i]], ID='IN_LINK_IV_EQ_'+str(i)))
+
+        if len(k_input)!=init_nbr_words: raise Exception("Stream_cipher: the number of key words does not match the number of words in the initialization function")
+        for i in range(len(k_input)): self.inputs_constraints.append(op.Equal([k_input[i]], [self.functions["INITIALIZATION"].vars[1][0][i + init_nbr_words]], ID='IN_LINK_K_EQ_'+str(i)))
+
+        if len(keystream_output)!=keystream_nbr_words: raise Exception("Stream_cipher: the number of keystream words does not match the number of words in the keystream generation function")
+        for i in range(len(keystream_output)): self.outputs_constraints.append(op.Equal([self.functions["KEYSTREAM_GEN"].vars[nbr_rounds_keystream][keystream_nbr_layers][i]], [keystream_output[i]], ID='OUT_LINK_KS_EQ_'+str(i)))

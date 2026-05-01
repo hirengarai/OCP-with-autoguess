@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from tools.model_constraints import gen_xor_constraints, gen_word_xor_constraints, gen_nxor_constraints, gen_word_nxor_constraints
 
 
 def RaiseExceptionVersionNotExisting(class_name, model_version, model_type):
@@ -45,13 +46,14 @@ class Operator(ABC):
                     self.output_vars[i][j].display()
         return self.__class__.__name__
 
-    def get_var_ID(self, in_out, index, unroll=False, index2=None):    # obtain the ID of the variable located at "index" of input or output (in_out) for that operator. Compresses the ID if unroll is False
+    # obtain the ID of the variable located at "index" of input or output (in_out) for that operator. Compresses the ID if unroll is False
+    def get_var_ID(self, in_out, index, unroll=False):
         if in_out == 'out':
-            if index2 is not None: return self.output_vars[index][index2].ID if unroll else self.output_vars[index][index2].remove_round_from_ID()
-            else: return self.output_vars[index].ID if unroll else self.output_vars[index].remove_round_from_ID()
-        if in_out == 'in':
-            if index2 is not None: return self.input_vars[index][index2].ID if unroll else self.input_vars[index][index2].remove_round_from_ID()
-            else: return self.input_vars[index].ID if unroll else self.input_vars[index].remove_round_from_ID()
+            return self.output_vars[index].ID if unroll else self.output_vars[index].remove_round_from_ID()
+        elif in_out == 'in':
+            return self.input_vars[index].ID if unroll else self.input_vars[index].remove_round_from_ID()
+        else:
+            raise Exception(str(self.__class__.__name__) + ": unknown in_out type '" + in_out + "'")
 
     def get_header_ID(self):
         return [self.__class__.__name__, self.model_version]
@@ -59,24 +61,13 @@ class Operator(ABC):
     def generate_implementation_header(self, implementation_type='python'):    # generic method that generates the code for the header of the modeling of that operator
         return None
 
-    def get_var_model(self, in_out, index, bitwise=True):
+    # method that returns the ID of the variable located at "index" of either the input or output of the operator, with options for bitwise listing and dimension unrolling
+    def get_var_model(self, in_out, index, bitwise=True, dim=1):
         var = self.input_vars[index] if in_out == 'in' else self.output_vars[index]
-        if not isinstance(var, list):
-            var_ID = self.get_var_ID(in_out, index, unroll=True)
-            if bitwise and var.bitsize > 1:
-                return [f"{var_ID}_{i}" for i in range(var.bitsize)]
-            return [var_ID]
-        elif isinstance(var, list):
-            vars = []
-            for i, v in enumerate(var):
-                var_ID = self.get_var_ID(in_out, index, unroll=True, index2=i)
-                if bitwise and v.bitsize > 1:
-                    vars.extend([f"{var_ID}_{j}" for j in range(v.bitsize)])
-                else:
-                    vars.append(var_ID)
-            return vars
+        if bitwise and var.bitsize > 1:
+            return [f"{var.ID}_{i}_{j}" for i in range(var.bitsize) for j in range(dim)] if dim > 1 else [f"{var.ID}_{i}" for i in range(var.bitsize)]
         else:
-            raise TypeError(f"{self.__class__.__name__}: Expected Variable or list of Variable at index {index}, "f"got {type(var)} instead.")
+            return [f"{var.ID}_{j}" for j in range(dim)] if dim > 1 else [f"{var.ID}"]
 
     @abstractmethod
     def generate_implementation(self, implementation_type='python'):  # generic method (abstract) that generates the code for the implementation of that operator
@@ -127,23 +118,86 @@ class NoneOperator(Operator):  # Ghost Operator, does nothing (just a placeholde
         return []
 
 
-class CopyOperator(Operator):  # Copy Operator
+class CopyOperator(Operator):  # Operator that duplicates one input into multiple outputs: b_0, b_1, ..., b_n = a
     def __init__(self, input_vars, output_vars, ID = None):
-        super().__init__(input_vars, output_vars, ID = ID)
+        if len(input_vars) != 1:
+            raise Exception(f"{self.__class__.__name__}: your input does not contain exactly 1 element")
+        if len(output_vars) < 2:
+            raise Exception(f"{self.__class__.__name__}: your output must contain at least 2 element")
+        super().__init__(input_vars, output_vars, ID=ID)
 
     def generate_implementation(self, implementation_type='python', unroll=False):
-        # TODO
-        return []
+        in_id = self.get_var_ID('in', 0, unroll)
+        if implementation_type == 'python':
+            return [f"{self.get_var_ID('out', j, unroll)} = {in_id}" for j in range(len(self.output_vars))]
+        elif implementation_type == 'c':
+            return [f"{self.get_var_ID('out', j, unroll)} = {in_id};" for j in range(len(self.output_vars))]
+        elif implementation_type == 'verilog':
+            return [f"assign {self.get_var_ID('out', j, unroll)} = {in_id};" for j in range(len(self.output_vars))]
+        else:
+            raise Exception(f"{self.__class__.__name__}: unknown implementation type '{implementation_type}'")
 
     def generate_model(self, model_type='sat'):
-        # TODO
-        return []
+        model_list = []
+        if model_type in ['sat', 'milp']:
+            # Modeling for differential cryptanalysis
+            if model_type == "sat" and self.model_version in [self.__class__.__name__ + "_XORDIFF"]:
+                var_in, var_out = (self.get_var_model("in", 0), [self.get_var_model("out", i) for i in range(len(self.output_vars))])
+                for i in range(self.input_vars[0].bitsize):
+                    for j in range(len(var_out)):
+                        model_list += [f"{var_out[j][i]} -{var_in[i]}", f"-{var_out[j][i]} {var_in[i]}"]
+                return model_list
+            elif model_type == "milp" and self.model_version in [self.__class__.__name__ + "_XORDIFF"]:
+                var_in, var_out = (self.get_var_model("in", 0), [self.get_var_model("out", i) for i in range(len(self.output_vars))])
+                for i in range(self.output_vars[0].bitsize):
+                    for j in range(len(var_out)):
+                        model_list += [f"{var_out[j][i]} - {var_in[i]} = 0"]
+                model_list.append('Binary\n' + ' '.join(var_in + sum(var_out, [])))
+                return model_list
+            # Modeling for truncated differential cryptanalysis
+            elif model_type == "sat" and self.model_version == self.__class__.__name__ + "_TRUNCATEDDIFF":
+                var_in, var_out = (self.get_var_model("in", 0, bitwise=False), [self.get_var_model("out", i, bitwise=False) for i in range(len(self.output_vars))])
+                for j in range(len(var_out)):
+                    model_list += [f'{var_in[0]} -{var_out[j][0]}', f'-{var_in[0]} {var_out[j][0]}']
+                return model_list
+            elif model_type == "milp" and self.model_version == self.__class__.__name__ + "_TRUNCATEDDIFF":
+                var_in, var_out = (self.get_var_model("in", 0, bitwise=False), [self.get_var_model("out", i, bitwise=False) for i in range(len(self.output_vars))])
+                for j in range(len(var_out)):
+                    model_list += [f"{var_out[j][0]} - {var_in[0]} = 0"]
+                model_list.append('Binary\n' + ' '.join(var_in + sum(var_out, [])))
+                return model_list
+            # Modeling for linear cryptanalysis
+            elif self.model_version == self.__class__.__name__ + "_LINEAR":
+                var_in, var_out = (self.get_var_model("in", 0), [self.get_var_model("out", i) for i in range(len(self.output_vars))])
+                if len(var_out) == 2: # Two outputs: out1, out2 = in
+                    for i in range(self.input_vars[0].bitsize):
+                        model_list.extend(gen_xor_constraints(var_in[i], var_out[0][i], var_out[1][i], model_type))
+                elif len(var_out) >= 3: # n outputs: out1, out2, ..., outn = in
+                    for i in range(self.input_vars[0].bitsize):
+                        if model_type == 'milp':
+                            v_dummy = f"{self.ID}_d_{i}"
+                        else:
+                            v_dummy = None
+                        model_list.extend(gen_nxor_constraints([var_out[j][i] for j in range(len(var_out))], var_in[i], model_type=model_type, v_dummy=v_dummy))
+                return model_list
+            # Modeling for truncated linear cryptanalysis
+            elif len(self.output_vars) == 2 and self.model_version == self.__class__.__name__ + "_TRUNCATEDLINEAR":
+                var_in, var_out1, var_out2 = (self.get_var_model("in", 0, bitwise=False),  self.get_var_model("out", 0, bitwise=False), self.get_var_model("out", 1, bitwise=False))
+                model_list.extend(gen_word_xor_constraints(var_out1[0], var_out2[0], var_in[0], model_type))
+                return model_list
+            elif len(self.output_vars) >= 3 and model_type == "milp" and self.model_version == self.__class__.__name__ + "_TRUNCATEDLINEAR":
+                var_in, var_out = (self.get_var_model("in", 0, bitwise=False), [self.get_var_model("out", i, bitwise=False) for i in range(len(self.output_vars))])
+                model_list.extend(gen_word_nxor_constraints([var_out[j][0] for j in range(len(var_out))], var_in[0], model_type))
+                return model_list
+            else: RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
+        elif model_type == 'cp': RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
+        else: raise Exception(str(self.__class__.__name__) + ": unknown model type '" + model_type + "'")
+
 
 
 class Equal(UnaryOperator):  # Operator assigning equality between the input variable and output variable (must be of same bitsize)
-    def __init__(self, input_vars, output_vars, simple_connect=True, ID = None):
+    def __init__(self, input_vars, output_vars, ID = None):
         super().__init__(input_vars, output_vars, ID = ID)
-        self.simple_connect = simple_connect # "True" if this is an equality constraint here just to go to the next layer
 
     def generate_implementation(self, implementation_type='python', unroll=False):
         if implementation_type == 'python':
@@ -259,18 +313,18 @@ class Rot(UnaryOperator):     # Operator for the rotation function: rotation of 
     def generate_model(self, model_type='sat'):
         if model_type == 'sat':
             var_in, var_out = (self.get_var_model("in", 0), self.get_var_model("out", 0))
-            if (self.direction =='r' and self.model_version in [self.__class__.__name__ + "_XORDIFF"]) or (self.direction =='l' and self.model_version in [self.__class__.__name__ + "_LINEAR"]):
+            if (self.direction =='r' and self.model_version in [self.__class__.__name__ + "_XORDIFF", self.__class__.__name__ + "_LINEAR"]):
                 return [clause for i in range(len(var_in)) for clause in (f"-{var_in[i]} {var_out[(i+self.amount)%len(var_in)]}", f"{var_in[i]} -{var_out[(i+self.amount)%len(var_in)]}")]
-            elif (self.direction =='l' and self.model_version in [self.__class__.__name__ + "_XORDIFF"]) or (self.direction =='r' and self.model_version in [self.__class__.__name__ + "_LINEAR"]):
+            elif (self.direction =='l' and self.model_version in [self.__class__.__name__ + "_XORDIFF", self.__class__.__name__ + "_LINEAR"]):
                 return [clause for i in range(len(var_in)) for clause in (f"-{var_in[(i+self.amount)%len(var_in)]} {var_out[i]}", f"{var_in[(i+self.amount)%len(var_in)]} -{var_out[i]}")]
             else: RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
         elif model_type == 'milp':
             var_in, var_out = (self.get_var_model("in", 0), self.get_var_model("out", 0))
-            if (self.direction == 'r' and self.model_version in [self.__class__.__name__ + "_XORDIFF"]) or (self.direction == 'l' and self.model_version in [self.__class__.__name__ + "_LINEAR"]):
+            if (self.direction == 'r' and self.model_version in [self.__class__.__name__ + "_XORDIFF", self.__class__.__name__ + "_LINEAR"]):
                 model_list = [f'{var_in[i]} - {var_out[(i + self.amount) % len(var_in)]} = 0' for i in range(len(var_in))]
                 model_list.append('Binary\n' +  ' '.join(v for v in var_in + var_out))
                 return model_list
-            elif (self.direction =='l' and self.model_version in [self.__class__.__name__ + "_XORDIFF"]) or (self.direction =='r' and self.model_version in [self.__class__.__name__ + "_LINEAR"]):
+            elif (self.direction =='l' and self.model_version in [self.__class__.__name__ + "_XORDIFF", self.__class__.__name__ + "_LINEAR"]):
                 model_list = [f'{var_in[(i+self.amount)%len(var_in)]} - {var_out[i]} = 0' for i in range(len(var_in))]
                 model_list.append('Binary\n' +  ' '.join(v for v in var_in + var_out))
                 return  model_list
@@ -333,12 +387,12 @@ class Shift(UnaryOperator):    # Operator for the shift function: shift of the i
     def generate_model(self, model_type='sat'):
         if model_type == 'sat':
             var_in, var_out = (self.get_var_model("in", 0), self.get_var_model("out", 0))
-            if (self.direction =='r' and self.model_version in [self.__class__.__name__ + "_XORDIFF"]) or (self.direction =='l' and self.model_version in [self.__class__.__name__ + "_LINEAR"]):
+            if (self.direction =='r' and self.model_version in [self.__class__.__name__ + "_XORDIFF", self.__class__.__name__ + "_LINEAR"]):
                 model_list = [f"-{var_out[i]}" for i in range(self.amount)]
                 model_list += [clause for i in range(len(var_in)-self.amount) for clause in (f"-{var_in[i]} {var_out[i+self.amount]}", f"{var_in[i]} -{var_out[i+self.amount]}")]
                 model_list += [f"{var_in[i]} -{var_in[i]}" for i in range(len(var_in)-self.amount, len(var_in))]
                 return model_list
-            elif (self.direction =='l' and self.model_version in [self.__class__.__name__ + "_XORDIFF"]) or (self.direction =='r' and self.model_version in [self.__class__.__name__ + "_LINEAR"]):
+            elif (self.direction =='l' and self.model_version in [self.__class__.__name__ + "_XORDIFF", self.__class__.__name__ + "_LINEAR"]):
                 model_list = [f"{var_in[i]} -{var_in[i]}" for i in range(self.amount)]
                 model_list += [clause for i in range(len(var_in) - self.amount) for clause in (f"-{var_in[i+self.amount]} {var_out[i]}", f"{var_in[i+self.amount]} -{var_out[i]}")]
                 model_list += [f"-{var_out[i]}" for i in range(len(var_in)-self.amount, len(var_in))]
@@ -346,13 +400,13 @@ class Shift(UnaryOperator):    # Operator for the shift function: shift of the i
             else: RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
         elif model_type == 'milp':
             var_in, var_out = (self.get_var_model("in", 0), self.get_var_model("out", 0))
-            if (self.direction =='r' and self.model_version in [self.__class__.__name__ + "_XORDIFF"]) or (self.direction =='l' and self.model_version in [self.__class__.__name__ + "_LINEAR"]):
+            if (self.direction =='r' and self.model_version in [self.__class__.__name__ + "_XORDIFF", self.__class__.__name__ + "_LINEAR"]):
                 model_list = [f'{var_out[i]} = 0' for i in range(self.amount)]
                 model_list += [f'{var_in[i]} - {var_out[i+self.amount]} = 0' for i in range(len(var_in)-self.amount)]
                 model_list += [f"{var_in[i]} - {var_in[i]} = 0" for i in range(len(var_in)-self.amount, len(var_in))]
                 model_list.append('Binary\n' +  ' '.join(v for v in var_in + var_out))
                 return model_list
-            elif (self.direction =='l' and self.model_version in [self.__class__.__name__ + "_XORDIFF"])  or (self.direction =='r' and self.model_version in [self.__class__.__name__ + "_LINEAR"]):
+            elif (self.direction =='l' and self.model_version in [self.__class__.__name__ + "_XORDIFF", self.__class__.__name__ + "_LINEAR"]):
                 model_list = [f"{var_in[i]} - {var_in[i]} = 0" for i in range(self.amount)]
                 model_list += [f'{var_in[i+self.amount]} - {var_out[i]} = 0' for i in range(len(var_in)-self.amount)]
                 model_list += [f'{var_out[i]} = 0' for i in range(len(var_in)-self.amount, len(var_in))]
