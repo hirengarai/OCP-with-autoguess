@@ -9,3 +9,7 @@ temp/
 .pytest_cache/
 **/temp/
 .DS_Store
+env312/
+venv/
+.venv/
+env/
