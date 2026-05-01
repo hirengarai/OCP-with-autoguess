@@ -18,14 +18,16 @@ from attacks.guess_and_determine import RelGenConfig, SolverConfig
 
 # Build PRESENT cipher
 nbr_rounds = 27
-cipher_name = "PRESENT_KEYSCH"
+cipher_name = "PRESENT"
 present_version = [64,80]
 
-inp  = [Variable(1, ID=f"in{i}")  for i in range(64)]
-outp = [Variable(1, ID=f"out{i}") for i in range(64)]
-key_var = [Variable(1, ID=f"key{i}") for i in range(80)]
+# inp  = [Variable(1, ID=f"in{i}")  for i in range(64)]
+# outp = [Variable(1, ID=f"out{i}") for i in range(64)]
+# key_var = [Variable(1, ID=f"key{i}") for i in range(80)]
 
-cipher = present.PRESENT_block_cipher(cipher_name,present_version, inp, key_var, outp,nbr_rounds=nbr_rounds)
+# cipher = present.PRESENT_block_cipher(cipher_name,present_version, inp, key_var, outp,nbr_rounds=nbr_rounds)
+
+cipher = present.PRESENT_BLOCKCIPHER(nbr_rounds, version=present_version)
 
 KS = cipher.functions["KEY_SCHEDULE"]
 
@@ -34,32 +36,39 @@ KS = cipher.functions["KEY_SCHEDULE"]
 def ridx(r_paper):   # paper k_r,·  → code round index
     return r_paper + 1   # if your model is 1-based; change to `return r_paper` if not
 
-known_pairs = []
+target = []
 
 # k0,16~47
-known_pairs += [(ridx(0), j) for j in range(16, 48)]
+target += [(ridx(0), j) for j in range(16, 48)]
 
 # k1,20~27 and k1,36~43
-known_pairs += [(ridx(1), j) for j in range(20, 28)]
-known_pairs += [(ridx(1), j) for j in range(36, 44)]
+target += [(ridx(1), j) for j in range(20, 28)]
+target += [(ridx(1), j) for j in range(36, 44)]
 
 # k25,{0,2,8,10,16,18,24,26,32,34,40,42,48,50,56,58}
 k25_list = [0,2,8,10,16,18,24,26,32,34,40,42,48,50,56,58]
-known_pairs += [(ridx(25), j) for j in k25_list]
+target += [(ridx(25), j) for j in k25_list]
 
 # k26,2*i  for i = 0..31   (i.e., even indices 0..62)
-known_pairs += [(ridx(26), 2*i) for i in range(32)]
+target += [(ridx(26), 2*i) for i in range(32)]
 
 # # Build the final known list (IDs)
-known_vars = [KS.vars[r][0][j].ID for (r, j) in known_pairs]
+target_vars = [KS.vars[r][0][j].ID for (r, j) in target]
 
-relationfile = f"relations_{cipher_name}_{nbr_rounds}r.txt"
-
-# Run Autoguess
+# Run attack
 result = attacks.guess_and_determine_attack(
     KS,
-    target_vars=known_vars,
-    output_file=relationfile,
-    relgen_cfg=RelGenConfig(flat_sbox=False),
-    solver_cfg=SolverConfig(solver="cp", preprocess=1, maxguess=60, maxsteps=10),
+    name_prefix=cipher_name,
+    target_vars=target_vars,
+    relgen_cfg=RelGenConfig(
+        flat_sbox=False,
+        algebraic_layers=["PermutationLayer"],
+    ),
+    solver_cfg=SolverConfig(
+        solver="sat",
+        preprocess=1,
+        maxguess=60,
+        maxsteps=10,
+        timelimit=10,
+    ),
 )
