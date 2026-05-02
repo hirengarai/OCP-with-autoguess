@@ -13,9 +13,9 @@ import primitives.skinny as skinny
 from attacks import attacks
 from attacks.guess_and_determine import RelGenConfig, SolverConfig
 
-# Build 20 round SKINNY-64-128 cipher (TK2 version) 
+# Build 20 round SKINNY-64-128 cipher (TK2 version)
 nbr_rounds = 20
-cipher_name = "_S_KINNY_TK2"
+cipher_name = "SKINNY_TK2"
 skinny_version = [64, 128]
 
 
@@ -30,7 +30,7 @@ target_specs = {
     19: [32+0, 32+1, 32+3, 32+4, 32+5, 32+7],
     20: [32+0, 32+1, 32+3, 32+4, 32+5, 32+6, 32+7],
 }
-    
+
 
 target_vars = [
     KS.vars[r][3][i].ID

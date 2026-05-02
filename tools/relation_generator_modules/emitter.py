@@ -169,7 +169,7 @@ def _call_gen_autoguess(
     Different operators accept different subsets of parameters.
     We use inspect.signature to only pass what the method accepts.
     """
-    gen = op._gen_constr_autoguess
+    gen = op.gen_autoguess_constr
     supported = set(inspect.signature(gen).parameters.keys())
 
     kwargs = {}
@@ -372,7 +372,7 @@ def emit_function(
                     continue
 
                 # Must have the method
-                if not hasattr(op, "_gen_constr_autoguess"):
+                if not hasattr(op, "gen_autoguess_constr"):
                     continue
 
                 # Determine algebraic mode
