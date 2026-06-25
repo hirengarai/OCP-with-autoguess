@@ -232,17 +232,25 @@ class Equal(UnaryOperator):  # Operator assigning equality between the input var
         elif model_type == 'cp': RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
         else: raise Exception(str(self.__class__.__name__) + ": unknown model type '" + model_type + "'")
         
-    def gen_autoguess_constr(self, *, algebraic=False):
+    def gen_autoguess_constr(self, *, algebraic_mode=False, treat_as_nonrename=False):
         """
         Generate Autoguess-style constraints for Equal operation.
-        - If algebraic=False (default): emit connection relation "a, b"
-        - If algebraic=True:            emit algebraic relation "a + b"
-        
+        - algebraic_mode=False (default): connection relation "a, b"
+        - algebraic_mode=True:             algebraic relation   "a + b"
+        - treat_as_nonrename=True appends ", NONRENAME" to connection lines so
+          the cleaner does not collapse them. Has no effect when algebraic_mode
+          is True (algebraic relations are not renames in the first place).
+
         Supports:
         - Single input to single output: a = b
         - Multiple inputs to multiple outputs: generates pairwise equality constraints
+
+        Configuration errors (empty/mismatched wiring, missing ``input_vars`` /
+        ``output_vars``) raise rather than returning ``# ...`` comment lines —
+        downstream stages strip ``#``-prefixed lines, so silent emission of
+        them would make real bugs invisible.
         """
-        
+
         def _flatten(vars_):
             for v in vars_:
                 if isinstance(v, (list, tuple)):
@@ -250,30 +258,32 @@ class Equal(UnaryOperator):  # Operator assigning equality between the input var
                         yield u
                 else:
                     yield v
-        
-        try:
-            in_vars = [v.ID for v in _flatten(self.input_vars)]
-            out_vars = [v.ID for v in _flatten(self.output_vars)]
-            
-            if not in_vars or not out_vars:
-                return [f"# Equal {getattr(self, 'ID', '?')}: empty inputs or outputs"]
-            
-            # If dimensions match, generate pairwise equality constraints
-            if len(in_vars) == len(out_vars):
-                constraints = []
-                for a, b in zip(in_vars, out_vars):
-                    if algebraic:
-                        constraints.append(f"{a} + {b}")
-                    else:
-                        constraints.append(f"{a}, {b}")
-                return constraints
+
+        opid = getattr(self, 'ID', '?')
+        in_vars = [v.ID for v in _flatten(self.input_vars)]
+        out_vars = [v.ID for v in _flatten(self.output_vars)]
+
+        if not in_vars or not out_vars:
+            raise ValueError(
+                f"Equal {opid}: empty inputs or outputs "
+                f"(in={len(in_vars)}, out={len(out_vars)})"
+            )
+
+        if len(in_vars) != len(out_vars):
+            raise ValueError(
+                f"Equal {opid}: mismatched dimensions "
+                f"{len(in_vars)} inputs vs {len(out_vars)} outputs"
+            )
+
+        constraints = []
+        for a, b in zip(in_vars, out_vars):
+            if algebraic_mode:
+                constraints.append(f"{a} + {b}")
+            elif treat_as_nonrename:
+                constraints.append(f"{a}, {b}, NONRENAME")
             else:
-                return [f"# Equal {getattr(self, 'ID', '?')}: mismatched dimensions {len(in_vars)} inputs vs {len(out_vars)} outputs"]
-        
-        except AttributeError:
-            return [f"# Equal {getattr(self, 'ID', '?')}: missing input_vars or output_vars"]
-        except Exception:
-            return [f"# Error formatting Equal {getattr(self, 'ID', '?')}"]
+                constraints.append(f"{a}, {b}")
+        return constraints
 
 
 class Rot(UnaryOperator):     # Operator for the rotation function: rotation of the input variable to the output variable with "direction" ('l' or 'r') and "amount" of bits
@@ -332,39 +342,47 @@ class Rot(UnaryOperator):     # Operator for the rotation function: rotation of 
         elif model_type == 'cp': RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
         else: raise Exception(str(self.__class__.__name__) + ": unknown model type '" + model_type + "'")
         
-    def gen_autoguess_constr(self):
+    def gen_autoguess_constr(self, *, treat_as_nonrename=False):
         """
         Generate Autoguess-style constraints for Rotation operation.
         Emits pairwise connection relations for bit-wise rotation.
-        
-        For rotation by r positions: input bit i maps to output bit (i+r) % n
+
+        For rotation by r positions: input bit i maps to output bit (i+r) % n.
         Generates n constraints connecting each input bit to its rotated output bit.
+
+        treat_as_nonrename=True appends ", NONRENAME" so the cleaner does not
+        collapse the bit pairs (use this when you want the rotation kept as a
+        real relation in the cleaned output).
+
+        Configuration errors raise; see :meth:`Equal.gen_autoguess_constr` for
+        rationale.
         """
-        
+
         def _flatten(vars_):
             for v in vars_:
                 if isinstance(v, (list, tuple)):
                     yield from v
                 else:
                     yield v
-        
-        try:
-            in_vars = [v.ID for v in _flatten(self.input_vars)]
-            out_vars = [v.ID for v in _flatten(self.output_vars)]
-            
-            if not in_vars or not out_vars:
-                return [f"# Rotation {getattr(self, 'ID', '?')}: empty inputs or outputs"]
-            
-            if len(in_vars) != len(out_vars):
-                return [f"# Rotation {getattr(self, 'ID', '?')}: mismatched dimensions {len(in_vars)} inputs vs {len(out_vars)} outputs"]
-            
-            # Generate pairwise rotation constraints
-            return [f"{in_bit}, {out_bit}" for in_bit, out_bit in zip(in_vars, out_vars)]
-        
-        except AttributeError:
-            return [f"# Rotation {getattr(self, 'ID', '?')}: missing input_vars or output_vars"]
-        except Exception:
-            return [f"# Error formatting Rotation {getattr(self, 'ID', '?')}"]
+
+        opid = getattr(self, 'ID', '?')
+        in_vars = [v.ID for v in _flatten(self.input_vars)]
+        out_vars = [v.ID for v in _flatten(self.output_vars)]
+
+        if not in_vars or not out_vars:
+            raise ValueError(
+                f"Rotation {opid}: empty inputs or outputs "
+                f"(in={len(in_vars)}, out={len(out_vars)})"
+            )
+
+        if len(in_vars) != len(out_vars):
+            raise ValueError(
+                f"Rotation {opid}: mismatched dimensions "
+                f"{len(in_vars)} inputs vs {len(out_vars)} outputs"
+            )
+
+        suffix = ", NONRENAME" if treat_as_nonrename else ""
+        return [f"{in_bit}, {out_bit}{suffix}" for in_bit, out_bit in zip(in_vars, out_vars)]
 
 
 class Shift(UnaryOperator):    # Operator for the shift function: shift of the input variable to the output variable with "direction" ('l' or 'r') and "amount" of bits

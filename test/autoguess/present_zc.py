@@ -21,16 +21,10 @@ nbr_rounds = 27
 cipher_name = "PRESENT"
 present_version = [64,80]
 
-# inp  = [Variable(1, ID=f"in{i}")  for i in range(64)]
-# outp = [Variable(1, ID=f"out{i}") for i in range(64)]
-# key_var = [Variable(1, ID=f"key{i}") for i in range(80)]
-
-# cipher = present.PRESENT_block_cipher(cipher_name,present_version, inp, key_var, outp,nbr_rounds=nbr_rounds)
 
 cipher = present.PRESENT_BLOCKCIPHER(nbr_rounds, version=present_version)
 
 KS = cipher.functions["KEY_SCHEDULE"]
-
 
 # Define known variables (input + output state)
 def ridx(r_paper):   # paper k_r,·  → code round index
@@ -61,7 +55,7 @@ result = attacks.guess_and_determine_attack(
     name_prefix=cipher_name,
     target_vars=target_vars,
     relgen_cfg=RelGenConfig(
-        flat_sbox=False,
+        sbox_form="implication",
         algebraic_layers=["PermutationLayer"],
     ),
     solver_cfg=SolverConfig(
@@ -69,6 +63,5 @@ result = attacks.guess_and_determine_attack(
         preprocess=1,
         maxguess=60,
         maxsteps=10,
-        timelimit=10,
     ),
 )

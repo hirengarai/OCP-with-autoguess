@@ -12,7 +12,7 @@ Configuration is grouped via two dataclasses:
     result = search_guess_basis(
         cipher,
         target_vars=[...],
-        relgen_cfg=RelGenConfig(skip_rounds=[4], flat_sbox=False),
+        relgen_cfg=RelGenConfig(skip_rounds=[4], sbox_form="implication"),
         solver_cfg=SolverConfig(solver="sat", findmin=True, maxguess=20),
     )
 
@@ -33,11 +33,8 @@ from tools.autoguess_wrapper import run_autoguess
 from tools.relation_generator import generate_relations
 
 
-# ---------------------------------------------------------------------------
+
 # Configuration objects
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class RelGenConfig:
     """
@@ -51,9 +48,10 @@ class RelGenConfig:
     skip_layers, skip_ops, skip_rounds, skip_functions
         Filters passed to relation_generator. See its docstring.
 
-    flat_sbox : bool, default True
-        If True, emit S-box as a flat lookup table; otherwise as
-        Boolean equations.
+    sbox_form : "rename" | "implication" | None, default None
+        Per-S-box emission form. ``None`` infers from wiring shape
+        (single multi-bit var in/out → "rename"; otherwise "implication").
+        Use ``"rename"``/``"implication"`` to override.
 
     algebraic_layers : list of str, optional
         Layer class names emitted algebraically (e.g. ["MatrixLayer"]).
@@ -65,11 +63,15 @@ class RelGenConfig:
     output_file : str, optional
         Explicit relation-file path. If None, auto-generated.
 
-    canonical : bool, default True
-        If True, sort variables within each relation alphabetically.
-
-    cross_round_dir : bool, default False
-        If True, emit cross-round linking relations.
+    cleaning_direction : str or None, default None
+        One of "input", "output", "default", "opp_default". Selects which
+        round-boundary side the canonical reps land on. None means use
+        "default".
+            "input"       — uniform input boundary; survivors at vk_<k+1>_0_*.
+            "output"      — uniform output boundary; survivors at vk_<k>_<max>_*.
+            "default"     — earliest layer + earlier round; histogram
+                            splits between layer 0 and max_layer.
+            "opp_default" — opposite mixed corner.
 
     bridge_skipped_rounds : bool, default True
         If True, equate values across skipped rounds via bridge relations.
@@ -79,13 +81,13 @@ class RelGenConfig:
     skip_ops: Optional[List[str]] = None
     skip_rounds: Optional[List[int]] = None
     skip_functions: Optional[List[str]] = None
-    flat_sbox: bool = True
+    sbox_form: Optional[str] = None
     algebraic_layers: Optional[List[str]] = None
     perm_rename: bool = True
     rot_rename: bool = True
     gf2linear_rename: bool = True
-    canonical: bool = True
-    cross_round_dir: bool = False
+    cleaning_direction: Optional[str] = None
+    emit_debug_chains: bool = False
     bridge_skipped_rounds: bool = True
 
 
@@ -118,11 +120,8 @@ class SolverConfig:
     log: int = 0
 
 
-# ---------------------------------------------------------------------------
+
 # Engine
-# ---------------------------------------------------------------------------
-
-
 def search_guess_basis(
     cipher_or_function,
     *,

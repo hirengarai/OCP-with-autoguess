@@ -180,15 +180,16 @@ class XOR(BinaryOperator):  # Operator for the bitwise XOR operation: compute th
         elif model_type == 'cp': RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
         else: raise Exception(str(self.__class__.__name__) + ": unknown model type '" + model_type + "'")
         
-    def gen_autoguess_constr(self, *, algebraic=False):
+    def gen_autoguess_constr(self, *, algebraic_mode=False):
         """
         Generate Autoguess-style constraint for XOR.
-        - If algebraic=False (default): emit connection triple  "a, b, c"
-        - If algebraic=True:            emit algebraic form     "a + b + c"
-        
-        Supports n-input XOR: a ⊕ b ⊕ ... = c
+        - algebraic_mode=False (default): connection triple  "a, b, c"
+        - algebraic_mode=True:             algebraic form     "a + b + c"
+
+        Supports n-input XOR: a ⊕ b ⊕ ... = c. Configuration errors raise;
+        see :meth:`Equal.gen_autoguess_constr` for rationale.
         """
-        
+
         def _flatten(vars_):
             for v in vars_:
                 if isinstance(v, (list, tuple)):
@@ -196,28 +197,28 @@ class XOR(BinaryOperator):  # Operator for the bitwise XOR operation: compute th
                         yield u
                 else:
                     yield v
-        
-        try:
-            in_vars = [v.ID for v in _flatten(self.input_vars)]
-            out_vars = [v.ID for v in _flatten(self.output_vars)]
-            
-            if not in_vars or not out_vars:
-                return [f"# XOR {getattr(self, 'ID', '?')}: empty inputs or outputs"]
-            
-            if len(out_vars) != 1:
-                return [f"# XOR {getattr(self, 'ID', '?')}: expected 1 output, got {len(out_vars)}"]
-            
-            all_vars = in_vars + out_vars
-            
-            if algebraic:
-                return [" + ".join(all_vars)]
-            else:
-                return [", ".join(all_vars)]
-        
-        except AttributeError:
-            return [f"# XOR {getattr(self, 'ID', '?')}: missing input_vars or output_vars"]
-        except Exception:
-            return [f"# Error formatting XOR {getattr(self, 'ID', '?')}"]
+
+        opid = getattr(self, 'ID', '?')
+        in_vars = [v.ID for v in _flatten(self.input_vars)]
+        out_vars = [v.ID for v in _flatten(self.output_vars)]
+
+        if not in_vars or not out_vars:
+            raise ValueError(
+                f"XOR {opid}: empty inputs or outputs "
+                f"(in={len(in_vars)}, out={len(out_vars)})"
+            )
+
+        if len(out_vars) != 1:
+            raise ValueError(
+                f"XOR {opid}: expected 1 output, got {len(out_vars)}"
+            )
+
+        all_vars = in_vars + out_vars
+
+        if algebraic_mode:
+            return [" + ".join(all_vars)]
+        else:
+            return [", ".join(all_vars)]
 
 
 class N_XOR(Operator): # Operator of the n-xor: a_0 xor a_1 xor ... xor a_n = b
@@ -380,20 +381,23 @@ class ConstantXOR(UnaryOperator): # Operator for the constant addition using xor
         elif model_type == 'cp': RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
         else: raise Exception(str(self.__class__.__name__) + ": unknown model type '" + model_type + "'")
         
-    def gen_autoguess_constr(self, *, algebraic: bool = False, **_):
+    def gen_autoguess_constr(self, *, algebraic_mode: bool = False):
         """
         AutoGuess view of constant addition:
         - We ignore the actual constant value and just keep the wiring.
-        - No algebraic relation, because x ⊕ c = y gives x + y = c (non-homogeneous).
+        - No algebraic relation, because x ⊕ c = y gives x + y = c (non-homogeneous);
+          algebraic_mode=True returns an empty list rather than lying.
         """
+        opid = getattr(self, 'ID', 'CONSTADD')
         try:
             x = self.input_vars[0].ID   # before constant
             y = self.output_vars[0].ID  # after constant
-        except Exception:
-            return [f"# Error formatting {getattr(self, 'ID', 'CONSTADD')}"]
+        except (AttributeError, IndexError) as e:
+            raise ValueError(
+                f"ConstantXOR {opid}: malformed input_vars/output_vars ({e})"
+            ) from e
 
-        if algebraic:
-            # Don’t lie: we cannot express the constant correctly in homogeneous form.
+        if algebraic_mode:
             return []
         else:
             # In connection relations, treat as rename for structure / connectivity.

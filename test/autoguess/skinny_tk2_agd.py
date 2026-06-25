@@ -14,7 +14,7 @@ import primitives.skinny as skinny
 from attacks import attacks
 from attacks.guess_and_determine import RelGenConfig, SolverConfig
 
-# Build 10 round SKINNY-64-64 cipher (TK1 version) 
+# Build 10 round SKINNY-64-64 cipher (TK1 version)
 nbr_rounds = 11
 cipher_name = "SKINNY_TK2"
 skinny_version = [64, 128]

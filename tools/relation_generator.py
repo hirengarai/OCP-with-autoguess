@@ -19,10 +19,13 @@ Usage:
     )
 """
 
+import warnings
 from pathlib import Path
-from typing import Any, Iterable, List, Optional
+from typing import Any, Iterable, List, Optional, cast
 
 from tools.relation_generator_modules import emitter, cleaner
+
+_UNSET: Any = object()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -131,7 +134,8 @@ def generate_relations(
     skip_ops: Optional[Iterable[str]] = None,
     skip_rounds: Optional[Iterable[int]] = None,
     skip_functions: Optional[Iterable[str]] = None,
-    flat_sbox: bool = True,
+    sbox_form: Optional[str] = None,
+    flat_sbox: Any = _UNSET,  # deprecated; use sbox_form
     algebraic_layers: Optional[Iterable[str]] = None,
     perm_rename: bool = True,
     rot_rename: bool = True,
@@ -145,10 +149,10 @@ def generate_relations(
     save_dirty: bool = True,
     # Cleaner controls
     enable_cleaning: bool = True,
-    canonical: bool = True,
-    cross_round_dir: bool = False,
+    cleaning_direction: Optional[str] = None,
     debug_cross_renames: bool = False,
     strict_anchored: bool = False,
+    emit_debug_chains: bool = False,
     bridge_skipped_rounds: bool = True,
 ) -> List[str]:
     """
@@ -174,8 +178,16 @@ def generate_relations(
     skip_functions : list of str
         Function names to skip (only used when function_mode=False).
 
+    sbox_form : "rename" | "implication" | None
+        Per-S-box emission form. ``None`` (default) infers from wiring shape:
+        single multi-bit var in/out → "rename" (one ``a, b`` line);
+        anything else → "implication" (one ``ins => out_bit`` per output bit).
+        Pass an explicit value to override the inference.
+
     flat_sbox : bool
-        Use flat S-box representation.
+        DEPRECATED. ``True`` ↔ ``sbox_form='rename'``;
+        ``False`` ↔ ``sbox_form='implication'``. Kept for one release with a
+        DeprecationWarning. Will be removed.
 
     algebraic_layers : list of str
         Layers to force into algebraic mode.
@@ -199,11 +211,16 @@ def generate_relations(
     enable_cleaning : bool
         If False, return raw formatted relations without cleaning.
 
-    canonical : bool
-        True = earliest layer/word as representative.
-
-    cross_round_dir : bool
-        False = later→earlier substitution, True = earlier→later.
+    cleaning_direction : "input" | "output" | "default" | "opp_default" | None
+        Selects which round-boundary side the canonical reps land on:
+            "input"       — uniform input boundary; every survivor at
+                            vk_<later_round>_0_*.
+            "output"      — uniform output boundary; every survivor at
+                            vk_<earlier>_<max>_*.
+            "default"     — earliest layer + earlier round; histogram
+                            splits between layer 0 and max_layer.
+            "opp_default" — opposite mixed corner.
+        When None, "default" is used.
 
     debug_cross_renames : bool
         Include cross-round rename lines in output (debug only).
@@ -211,21 +228,40 @@ def generate_relations(
     strict_anchored : bool
         Error if 2+ anchored vars in same equivalence class.
 
+    emit_debug_chains : bool
+        If True, the cleaner appends a substitution-chain debug block after
+        the ``end`` marker (one chain per watched variable that actually
+        moved through the substitutions). Off by default: the file ends at
+        ``end``.
+
     Returns
     -------
     List of cleaned relation strings.
     """
+    # Deprecation: translate flat_sbox → sbox_form when the user passed it.
+    if flat_sbox is not _UNSET:
+        warnings.warn(
+            "flat_sbox is deprecated; use sbox_form=('rename'|'implication'|None) "
+            "instead. flat_sbox=True ↔ sbox_form='rename'; "
+            "flat_sbox=False ↔ sbox_form='implication'. None lets the emitter "
+            "infer the form from the S-box wiring shape.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if sbox_form is None:
+            sbox_form = "rename" if flat_sbox else "implication"
+
     # Convert rename flags to nonrename flags (True rename = False nonrename)
     nonrename_perm = not perm_rename
     nonrename_rot = not rot_rename
     nonrename_gf2 = not gf2linear_rename
 
     # Step 1: Emit raw relations
-    emitter_kwargs = dict(
+    emitter_kwargs: dict = dict(
         skip_layers=skip_layers,
         skip_ops=skip_ops,
         skip_rounds=skip_rounds,
-        flat_sbox=flat_sbox,
+        sbox_form=sbox_form,
         algebraic_layers=algebraic_layers,
         nonrename_perm=nonrename_perm,
         nonrename_rot=nonrename_rot,
@@ -269,13 +305,14 @@ def generate_relations(
 
     print("Preparing final relations for Autoguess ...")
 
-    cleaned = cleaner.clean_relations(
-        formatted,
-        canonical=canonical,
-        cross_round_dir=cross_round_dir,
-        debug_cross_renames=debug_cross_renames,
-        strict_anchored=strict_anchored,
+    _direction = cleaning_direction if cleaning_direction is not None else "default"
+    cleaner_config = cleaner.CleanerConfig(
+        cleaning_direction=cast(cleaner.CleaningDirection, _direction),
+        debug_cross_renames=bool(debug_cross_renames),
+        strict_anchored=bool(strict_anchored),
+        emit_debug_chains=bool(emit_debug_chains),
     )
+    cleaned = cleaner.clean_relations(formatted, config=cleaner_config)
 
     # Step 6: Save and report
     _save_lines(cleaned, output_file)

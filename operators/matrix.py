@@ -1262,12 +1262,18 @@ class GF2Linear_Trans(
                 + "'"
             )
 
-    def gen_autoguess_constr(self, *, algebraic_mode=False, treat_as_nonrename=False):
+    def gen_autoguess_constr(self, *, treat_as_nonrename=False):
         """
         AutoGuess constraint for GF2Linear_Trans (bijective binary matrix on a word).
 
         At word level this is a simple rename: knowing input determines output
-        and vice versa (the matrix is square, hence invertible).
+        and vice versa (the matrix is square, hence invertible). AutoGuess
+        relations are variable-level, so the rename form is already tight —
+        there is no algebraic_mode here. (A bit-level XOR-equation form would
+        require introducing bit-IDs that don't connect to anything else in the
+        relation file; out of scope for this operator.) Filter via the
+        emitter's friendly name ``"LFSRLayer"``.
+
         treat_as_nonrename=True : append NONRENAME to prevent the cleaner from
         collapsing this as a trivial rename.
         """
