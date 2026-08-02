@@ -1,5 +1,54 @@
 # Changelog
 
+## 2026-08-02 — guess-and-determine follows the OCP attack convention
+
+**Breaking.** `guess_and_determine_attack` / `search_guess_basis` now take the
+same arguments as every other OCP attack entry point, instead of `*args,
+**kwargs` over two dataclasses. Behaviour is unchanged: the kwargs reaching
+`generate_relations` and `run_autoguess` are identical before and after for all
+seven scripts in `test/autoguess/`.
+
+**New signature:**
+
+```python
+guess_and_determine_attack(cipher, goal="GUESSBASIS", known_vars=None,
+                           target_vars=None, not_guessed_vars=None,
+                           protect_all_targets=False, objective_target="EXISTENCE",
+                           show_mode=0, config_model=None, config_solver=None)
+```
+
+**Migration:**
+
+- `relgen_cfg=RelGenConfig(**kw)` → `config_model={**kw}`
+- `solver_cfg=SolverConfig(solver=F)` → `config_model={"model_type": F}`
+- `solver_cfg=SolverConfig(satsolver=B)` → `config_solver={"solver": B}`
+- `SolverConfig(maxguess=N)` → `objective_target="AT MOST N"`
+- `SolverConfig(findmin=True)` → `objective_target="OPTIMAL"`
+- `SolverConfig(reducebasis=True)` → `goal="REDUCEBASIS"`
+- `SolverConfig(maxsteps=N)` → `config_model={"maxsteps": N}`
+- `name_prefix=P` / `output_file=F` → `config_model={"name_prefix": P}` / `{"filename": F}`
+- `drawgraph` / `tikz` / `log` → `show_mode` (0 results, 1 +graph, 2 +log, 3 +tikz).
+  The old defaults (`drawgraph=True`, `log=0`) correspond to `show_mode=1`.
+
+`RelGenConfig` and `SolverConfig` still exist but are internal plumbing;
+callers no longer import them.
+
+**Also:**
+
+- Unknown `config_model` / `config_solver` keys now raise `ValueError` listing
+  the accepted keys, instead of being silently ignored.
+- The relation-file path is resolved once up front rather than derived in two
+  places; it is named from the cipher and modelling options only, so runs
+  differing only in objective reuse it.
+- `test/autoguess/files/` is now gitignored.
+- `autoguess_usage_guide.md` rewritten. Beyond the API change it also corrected
+  pre-existing errors: `flat_sbox` / `canonical` / `cross_round_dir` were listed
+  as `RelGenConfig` fields but do not exist (the real ones are `sbox_form` and
+  `cleaning_direction`); the graph artifacts are `*_graph` and `*_graph.pdf`,
+  not `*_graph.gv` / `*_graph.gv.pdf`; `MatrixLayer` covers `Matrix` only, with
+  `GF2Linear_Trans` under `LFSRLayer`; and the quick-start example returned no
+  solution because it relied on the default `maxguess`.
+
 ## 2026-05-13 — audit fixes in cleaner + emitter
 
 Eleven issues from an external review were addressed. The one rejected

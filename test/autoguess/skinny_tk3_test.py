@@ -11,7 +11,6 @@ if str(ROOT_DIR) not in sys.path:
 from variables.variables import Variable
 import primitives.skinny as skinny
 from attacks import attacks
-from attacks.guess_and_determine import RelGenConfig, SolverConfig
 
 # Build SKINNY-64-192 cipher (TK3 version)
 nbr_rounds = 23
@@ -46,6 +45,11 @@ target_vars = [
 result = attacks.guess_and_determine_attack(
     SK,
     target_vars=target_vars,
-    relgen_cfg=RelGenConfig(skip_rounds=list(range(1, 17)) + [24]),
-    solver_cfg=SolverConfig(solver="sat", maxguess=25, maxsteps=12),
+    objective_target="AT MOST 25",
+    show_mode=1,
+    config_model={
+        "model_type": "sat",
+        "skip_rounds": list(range(1, 17)) + [24],
+        "maxsteps": 12,
+    },
 )

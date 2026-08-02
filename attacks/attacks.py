@@ -4,8 +4,9 @@ Provides:
 
 1. differential attacks
 2. linear attacks
-3. two-stage differential/linear trail search (truncated- then bit-level)
-4. integral attacks
+3. guess-and-determine attacks
+4. two-stage differential/linear trail search (truncated- then bit-level)
+5. integral attacks
 
 Other types of attacks to be contributed in the future.
 """
@@ -14,14 +15,6 @@ import time
 import attacks.differential_cryptanalysis as diff
 import attacks.linear_cryptanalysis as linear
 import attacks.guess_and_determine as gd
-
-# **************************************************************************** #
-# This module provides a high-level attack interfaces, including:
-# 1. differential attacks
-# 2. linear attacks
-# 3. guess-and-determine attacks
-# 4. other types of attacks (to be contributed in the future)
-# **************************************************************************** #
 import attacks.integral_cryptanalysis as integral
 from tools.model_constraints import gen_predefined_constraints
 
@@ -67,11 +60,27 @@ def linear_attacks(cipher, goal="LINEARPATH_CORR", constraints=None,
     return trails
 
 
-# =================== Guess-and-Determine ===================
-def guess_and_determine_attack(*args, **kwargs):
-    """Guess-and-determine pipeline — timing wrapper over guess_and_determine.search_guess_basis."""
+# =================== Guess-and-Determine Attack ===================
+def guess_and_determine_attack(cipher, goal="GUESSBASIS", known_vars=None, target_vars=None,
+                               not_guessed_vars=None, protect_all_targets=False,
+                               objective_target="EXISTENCE", show_mode=0, config_model=None,
+                               config_solver=None):
+    """Search for a guess-and-determine basis of the given cipher.
+
+    See :func:`~attacks.guess_and_determine.search_guess_basis` for the
+    accepted parameters. Unlike the trail searches above there is no
+    ``constraints`` argument: the guess-and-determine problem is stated through
+    the ``known_vars`` / ``target_vars`` / ``not_guessed_vars`` variable roles.
+
+    Returns:
+        dict: The guess basis and determination steps found.
+    """
     time_start = time.time()
-    result = gd.search_guess_basis(*args, **kwargs)
+    result = gd.search_guess_basis(cipher, goal=goal, known_vars=known_vars,
+                                   target_vars=target_vars, not_guessed_vars=not_guessed_vars,
+                                   protect_all_targets=protect_all_targets,
+                                   objective_target=objective_target, show_mode=show_mode,
+                                   config_model=config_model, config_solver=config_solver)
     print(f"--- Total Time ---: {time.time() - time_start:.2f} seconds")
     return result
 

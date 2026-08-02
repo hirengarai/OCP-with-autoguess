@@ -12,7 +12,6 @@ if str(ROOT_DIR) not in sys.path:
 # import variables.variables as var
 import primitives.aes as aes
 from attacks import attacks
-from attacks.guess_and_determine import RelGenConfig, SolverConfig
 
 
 nbr_rounds = 2
@@ -30,13 +29,14 @@ known_vars = [v.ID for v in func.vars[1][0]] + \
 # Run attack
 result = attacks.guess_and_determine_attack(
     cipher,
-    name_prefix=cipher_name,
     known_vars=known_vars,
-    relgen_cfg=RelGenConfig(skip_rounds=[2]),
-    solver_cfg=SolverConfig(
-        solver="sat",
-        satsolver="cadical153",  # alternatives: glucose4, cadical153
-        maxguess=6,
-        maxsteps=14,
-    ),
+    objective_target="AT MOST 6",
+    show_mode=1,
+    config_model={
+        "model_type": "sat",
+        "name_prefix": cipher_name,
+        "skip_rounds": [2],
+        "maxsteps": 14,
+    },
+    config_solver={"solver": "cadical153"},  # alternatives: glucose4, cadical153
 )

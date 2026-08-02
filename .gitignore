@@ -5,6 +5,7 @@
 *.pyc
 files/*
 files/autoguess/
+test/autoguess/files/
 temp/
 .pytest_cache/
 **/temp/

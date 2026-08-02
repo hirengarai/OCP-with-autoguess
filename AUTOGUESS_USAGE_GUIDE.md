@@ -2,99 +2,147 @@
 
 A minimal reference for running guess-and-determine attacks via OCP's AutoGuess integration.
 
+The entry point follows the same shape as every other OCP attack (`diff_attacks`,
+`linear_attacks`, `integral_attacks`): a cipher, a `goal`, an `objective_target`,
+a `show_mode`, and two plain configuration dicts.
+
 ## Quick start
 
 ```python
 from attacks import attacks
-from attacks.guess_and_determine import RelGenConfig, SolverConfig
 import primitives.aes as aes
 
-cipher = aes.AES_block_cipher("aes", [128, 128], inp, key, outp, nbr_rounds=2)
+cipher = aes.AES_BLOCKCIPHER(2, [128, 128])
 func   = cipher.functions["PERMUTATION"]
-known  = [v.ID for v in func.vars[1][0]]
+
+# Known: the plaintext (round-1 input) and the ciphertext (last-round output).
+known_vars = [v.ID for v in func.vars[1][0]] + [v.ID for v in func.vars[func.nbr_rounds][1]]
 
 result = attacks.guess_and_determine_attack(
-    func,
-    target_vars=known,
-    solver_cfg=SolverConfig(solver="sat", maxguess=20, findmin=True),
+    cipher,
+    known_vars=known_vars,
+    objective_target="AT MOST 6",
+    config_model={"skip_rounds": [2], "maxsteps": 14},
 )
 ```
 
-That's it — `result["guessed_variables"]`, `result["determination_steps"]`, and the output files (below) are everything you need.
+Recovers the full 96-variable state from 6 guesses in 14 steps.
+`result["guessed_variables"]`, `result["determination_steps"]`, and the output
+files (below) are everything you need.
+
+Both bounds matter. Left to their defaults, `maxguess` is the number of targets
+and `maxsteps` is the number of variables; on most ciphers the first is too
+tight and the search returns no solution. If you get "no feasible solution
+found", raise `objective_target` and `config_model["maxsteps"]` before
+concluding anything.
 
 ## Function signature
 
-`attacks.guess_and_determine_attack(*args, **kwargs)` is a thin timing wrapper over `attacks.guess_and_determine.search_guess_basis`:
+`attacks.guess_and_determine_attack` is a thin timing wrapper over
+`attacks.guess_and_determine.search_guess_basis`; both take the same arguments:
 
 ```python
-search_guess_basis(
-    cipher_or_function,             # cipher (has .functions) or single function
-    *,
+guess_and_determine_attack(
+    cipher,                         # cipher (has .functions) or single function
+    goal="GUESSBASIS",              # GUESSBASIS | REDUCEBASIS
     known_vars=None,                # list[str] of variable IDs initially known
     target_vars=None,               # list[str] of IDs to determine
     not_guessed_vars=None,          # list[str] forbidden from being guessed
     protect_all_targets=False,      # True = key recovery (no target may be guessed)
-    name_prefix=None,               # auto-generated filename prefix
-    output_file=None,               # explicit relation-file path (overrides auto-naming)
-    relgen_cfg=RelGenConfig(),      # relation-generation options
-    solver_cfg=SolverConfig(),      # AutoGuess solver options
+    objective_target="EXISTENCE",   # EXISTENCE | OPTIMAL | "AT MOST X"
+    show_mode=0,                    # 0-3 output detail
+    config_model=None,              # dict: relation-generation / encoding options
+    config_solver=None,             # dict: solver backend options
 )
 ```
 
+Unlike the trail searches there is no `constraints` argument: the problem is
+stated through the `known_vars` / `target_vars` / `not_guessed_vars` roles.
+
+### `goal`
+
+| Value | Meaning |
+|---|---|
+| `"GUESSBASIS"` | Search for a guess basis (default) |
+| `"REDUCEBASIS"` | Reduce a supplied basis with the propagation-based reducer. Forces the `propagate` backend, overriding `config_model["model_type"]` |
+
+### `objective_target`
+
+| Value | Effect |
+|---|---|
+| `"EXISTENCE"` | Take whatever basis the encoding yields (default) |
+| `"OPTIMAL"` | Iterate to the minimum guess count |
+| `"AT MOST X"` | Cap the basis at X guesses |
+
+OCP's `"EXACTLY X"` and `"AT LEAST X"` have no AutoGuess counterpart and raise `ValueError`.
+
+### `show_mode`
+
+| Value | Output |
+|---|---|
+| `0` | Results only |
+| `1` | + determination-flow graph |
+| `2` | + solver log |
+| `3` | + TikZ source |
+
 ## Configuration
 
-### `RelGenConfig` — relation generation
+Both configs are plain dicts. An unrecognised key raises `ValueError` listing the accepted ones.
 
-| Field | Default | Description |
+### `config_model` — relation generation and encoding
+
+| Key | Default | Description |
 |---|---|---|
-| `skip_layers` | `None` | Layers to skip (friendly names: `MatrixLayer`, `RotationLayer`, …; or class names: `XOR`, `Equal`) |
+| `model_type` | `"sat"` | `sat \| milp \| smt \| cp \| mark \| elim \| propagate` — the framework the problem is encoded into |
+| `filename` | auto | Relation-file path; relative paths resolve under `test/autoguess/files/` |
+| `name_prefix` | `None` | Prefix for the auto-generated filename |
+| `maxsteps` | `None` | Determination depth (auto = #variables) |
+| `skip_layers` | `None` | Layers to skip (friendly names below, or class names like `XOR`, `Equal`) |
 | `skip_ops` | `None` | Operation class names to skip |
 | `skip_rounds` | `None` | Round indices to skip; gaps auto-bridged |
 | `skip_functions` | `None` | Function names to skip (full-cipher mode only) |
-| `flat_sbox` | `True` | `True` = lookup table; `False` = boolean equations |
+| `sbox_form` | `None` | `"rename"` or `"implication"`; `None` infers from the wiring shape |
 | `algebraic_layers` | `None` | Class names emitted algebraically (e.g. `["MatrixLayer"]`) |
 | `perm_rename` | `True` | Collapse permutation Equals via renaming |
 | `rot_rename` | `True` | Same for rotations |
 | `gf2linear_rename` | `True` | Same for GF2-linear ops |
-| `canonical` | `True` | Sort variables within each relation |
-| `cross_round_dir` | `False` | `False` = later→earlier rename; `True` = earlier→later |
+| `cleaning_direction` | `None` | `"input"` / `"output"` / `"default"` / `"opp_default"`; which round boundary the canonical reps land on |
 | `bridge_skipped_rounds` | `True` | Equate values across skipped rounds |
+| `emit_debug_chains` | `False` | Emit rename-chain diagnostics |
 
-### `SolverConfig` — AutoGuess backend
+### `config_solver` — backend
 
-| Field | Default | Description |
+| Key | Default | Description |
 |---|---|---|
-| `solver` | `"sat"` | `sat \| milp \| smt \| cp \| mark \| elim \| propagate` |
-| `findmin` | `False` | Iterate to find the minimum guess count |
-| `maxguess` | `None` | Upper bound on guesses (auto = #targets) |
-| `maxsteps` | `None` | Determination depth (auto = #variables) |
-| `reducebasis` | `False` | Run the propagation-based basis reducer (forces `solver=propagate`) |
-| `drawgraph` | `True` | Render determination-flow graph |
-| `tikz` | `0` | `1` to also emit a TikZ `.tex` |
-| `satsolver` / `smtsolver` / `cpsolver` | `cadical153` / `z3` / `cp-sat` | Backend choice |
-| `milpdirection` | `"min"` | `min` or `max` |
-| `cpoptimization` | `1` | `1` = optimize, `0` = decision |
+| `solver` | `"DEFAULT"` | Concrete backend. Resolves per `model_type`: `cadical153` (sat), `z3` (smt), `cp-sat` (cp). Ignored (with a warning) for `milp` / `mark` / `elim` / `propagate`, which expose no backend choice |
 | `timelimit` | `-1` | Per-solve timeout in seconds; `-1` = none |
 | `threads` | `0` | `0` = auto |
-| `preprocess`, `dglayout`, `log` | `0`, `"dot"`, `0` | Macaulay preprocess / graph layout / verbose logs |
+| `preprocess` | `0` | Macaulay preprocess |
+| `milpdirection` | `"min"` | `min` or `max` |
+| `cpoptimization` | `1` | `1` = optimize, `0` = decision |
+| `dglayout` | `"dot"` | Determination-graph layout |
+
+`findmin`, `maxguess`, `reducebasis`, `drawgraph`, `tikz` and `log` are **not** set
+here — they are derived from `objective_target`, `goal` and `show_mode`.
 
 Solver picker (general guidance): `sat` for most problems; `cp` when SAT is too rigid; `propagate` for pure deduction without optimization; `mark` / `elim` for the marking and elimination algorithms; `milp` for weighted/optimization-shaped problems.
 
 ## Output files
 
-All artifacts land under `test/autoguess/files/`. For `cipher.name="aes"`, 2 rounds:
+All artifacts land under `test/autoguess/files/` (gitignored). For `cipher.name="AES128"`, 3 modeling rounds:
 
 | Artifact | Path |
 |---|---|
-| Dirty (uncleaned) relations | `test/autoguess/files/temp/dirty_relations_aes_2r.txt` |
-| Cleaned relations (input to AutoGuess) | `test/autoguess/files/relations_aes_2r.txt` |
-| Text report | `test/autoguess/files/output_aes_2r` *(no extension)* |
-| Graphviz source | `test/autoguess/files/output_aes_2r_graph.gv` |
-| Determination-flow PDF | `test/autoguess/files/output_aes_2r_graph.gv.pdf` |
-| TikZ (only if `tikz=1`) | `test/autoguess/files/output_aes_2r_graph.tex` |
-| Solver intermediates (only if `log=1`) | `test/autoguess/files/temp/…` |
+| Dirty (uncleaned) relations | `test/autoguess/files/temp/dirty_relations_AES128_3r.txt` |
+| Cleaned relations (input to AutoGuess) | `test/autoguess/files/relations_AES128_3r.txt` |
+| Text report | `test/autoguess/files/output_AES128_3r` *(no extension)* |
+| Graphviz source | `test/autoguess/files/output_AES128_3r_graph` *(no extension)* |
+| Determination-flow PDF | `test/autoguess/files/output_AES128_3r_graph.pdf` |
+| TikZ (only at `show_mode=3`) | `test/autoguess/files/output_AES128_3r_graph.tex` |
+| Solver intermediates (only at `show_mode>=2`) | `test/autoguess/files/temp/…` |
 
-The output stem is derived from `output_file` by replacing `relations_` with `output_`.
+Setting `config_model["name_prefix"]` inserts the prefix: `relations_<prefix>_AES128_3r.txt`.
+The output stem is derived from the relation filename by replacing `relations_` with `output_`.
 
 Graph node colors: blue = known, red = guessed, green = derived.
 
@@ -120,22 +168,27 @@ ks = cipher.functions["KEY_SCHEDULE"]
 result = attacks.guess_and_determine_attack(
     ks,
     target_vars=[ks.vars[r][0][j].ID for (r, j) in known_pairs],
-    name_prefix="present_ks",
-    relgen_cfg=RelGenConfig(flat_sbox=False),
-    solver_cfg=SolverConfig(solver="cp", preprocess=1, maxguess=60, maxsteps=10),
+    objective_target="AT MOST 60",
+    config_model={
+        "model_type": "cp",
+        "name_prefix": "present_ks",
+        "sbox_form": "implication",
+        "maxsteps": 10,
+    },
+    config_solver={"preprocess": 1},
 )
 ```
 
-**Skip rounds / focus on non-linear core:**
+**Skip rounds / focus on the non-linear core:**
 
 ```python
-RelGenConfig(skip_rounds=[1, 2, 20], skip_layers=["MatrixLayer", "RotationLayer"])
+config_model={"skip_rounds": [1, 2, 20], "skip_layers": ["MatrixLayer", "RotationLayer"]}
 ```
 
 **Find the minimum guess basis (incremental SAT):**
 
 ```python
-SolverConfig(solver="sat", findmin=True, maxguess=30)
+objective_target="OPTIMAL", config_model={"model_type": "sat"}
 ```
 
 **Reduce a known basis via propagation:**
@@ -143,15 +196,15 @@ SolverConfig(solver="sat", findmin=True, maxguess=30)
 ```python
 result = attacks.guess_and_determine_attack(
     cipher,
+    goal="REDUCEBASIS",
     known_vars=initial_basis,
-    solver_cfg=SolverConfig(reducebasis=True),
 )
 ```
 
 **Publication-quality TikZ:**
 
 ```python
-SolverConfig(tikz=1, dglayout="dot")
+show_mode=3, config_solver={"dglayout": "dot"}
 ```
 
 ## Skip-layer reference
@@ -161,11 +214,13 @@ Friendly names accepted by `skip_layers` / `skip_ops`:
 | Friendly name | Underlying op classes |
 |---|---|
 | `AddConstantLayer` | `ConstantXOR`, `ConstantAdd` |
-| `AddIdentityLayer` | `Equal` |
+| `AddIdentityLayer` | `Equal` (IDs starting `ID_`) |
+| `PermutationLayer` | `Equal` (IDs starting `PERM_EQ_`, `SR_EQ_`, `K_PERM_EQ_`, …) |
 | `RotationLayer` / `ShiftLayer` | `Rot` / `Shift` |
 | `XORLayer` / `ANDLayer` / `ORLayer` / `NOTLayer` | `XOR`/`N_XOR`, `AND`, `OR`, `NOT` |
-| `SboxLayer` | All S-box classes |
-| `MatrixLayer` | `Matrix`, `GF2Linear` |
+| `SboxLayer` | All S-box classes, plus `Equal` with `SB_EQ_`/`SBOX_EQ_`/`SBX_EQ_` IDs |
+| `MatrixLayer` | `Matrix` (the MDS state layer) |
+| `LFSRLayer` | `GF2Linear_Trans` (tweakey-schedule word matrix) |
 | `ModAddLayer` / `ModMulLayer` | `ModAdd` / `ModMul` |
 | `CopyLayer` | `CopyOperator`, `COPY` |
 
@@ -180,10 +235,11 @@ from tools.relation_generator import generate_relations
 from tools.autoguess_wrapper   import run_autoguess
 ```
 
-`generate_relations` produces the `relations_*.txt` file; `run_autoguess` consumes it and writes the report and graph. The signatures match the dataclass fields above by name. The high-level `search_guess_basis` is just orchestration over these two.
+`generate_relations` produces the `relations_*.txt` file; `run_autoguess` consumes it and writes the report and graph. `search_guess_basis` is orchestration over these two: it translates `config_model` into `generate_relations` keywords and `config_solver` + `goal` + `objective_target` + `show_mode` into `run_autoguess` keywords.
 
 ## Notes / gotchas
 
 - The Groebner-basis solver is **not** available in this no-Sage variant. Use the upstream AutoGuess if you need it.
 - If `target_vars` is set and `not_guessed_vars` doesn't already exclude them, the first target is auto-protected so the trivial all-targets-guessed solution can't win. Set `protect_all_targets=True` to protect every target (key-recovery mode).
-- File paths inside `output_file` may be relative; they're resolved against `test/autoguess/files/` if not absolute.
+- Relative paths in `config_model["filename"]` are resolved against `test/autoguess/files/`.
+- The relation file is named from the cipher and modelling options only, not from `goal` or `objective_target` — runs that differ only in objective deliberately reuse it.

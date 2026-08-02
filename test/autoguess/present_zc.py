@@ -13,7 +13,6 @@ if str(ROOT_DIR) not in sys.path:
 from variables.variables import Variable
 import primitives.present as present
 from attacks import attacks
-from attacks.guess_and_determine import RelGenConfig, SolverConfig
 
 
 # Build PRESENT cipher
@@ -52,16 +51,15 @@ target_vars = [KS.vars[r][0][j].ID for (r, j) in target]
 # Run attack
 result = attacks.guess_and_determine_attack(
     KS,
-    name_prefix=cipher_name,
     target_vars=target_vars,
-    relgen_cfg=RelGenConfig(
-        sbox_form="implication",
-        algebraic_layers=["PermutationLayer"],
-    ),
-    solver_cfg=SolverConfig(
-        solver="sat",
-        preprocess=1,
-        maxguess=60,
-        maxsteps=10,
-    ),
+    objective_target="AT MOST 60",
+    show_mode=1,
+    config_model={
+        "model_type": "sat",
+        "name_prefix": cipher_name,
+        "sbox_form": "implication",
+        "algebraic_layers": ["PermutationLayer"],
+        "maxsteps": 10,
+    },
+    config_solver={"preprocess": 1},
 )
