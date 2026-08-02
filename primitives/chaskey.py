@@ -15,8 +15,9 @@ class Chaskey_permutation(Permutation):
         :param nbr_rounds: Number of rounds
         :param represent_mode: Integer specifying the mode of representation used for encoding the permutation.
         """
+        if nbr_rounds is None: nbr_rounds = 8   # default to Chaskey-8; Chaskey-LTS uses 12
         nbr_layers = 10
-        nbr_words = 4 
+        nbr_words = 4
         nbr_temp_words = 0
         word_bitsize = 32
         super().__init__(name, s_input, s_output, nbr_rounds, [nbr_layers, nbr_words, nbr_temp_words, word_bitsize])
@@ -37,11 +38,12 @@ class Chaskey_permutation(Permutation):
                 S.PermutationLayer("PERM2", i, 9, [2,1,0,3]) # Permutation layer
 
     def gen_test_vectors(self):
-        # π-only test vectors for 8-round Chaskey and 12-round Chaskey-LTS,
-        # computed from the spec round function (Mouha et al., SAC 2014) and
-        # cross-checked against the official reference C: the r=8 output is
-        # consistent with vectors[0] (empty-message MAC tag) in chaskey-speed.c.
-        # Refs: https://mouha.be/chaskey/  |  https://mouha.be/wp-content/uploads/chaskey-speed.c
+        # π-only test vectors: arbitrary input, outputs computed from the spec
+        # round function (Mouha et al., SAC 2014, Sec. 3) for r=8 (Chaskey) and
+        # r=12 (Chaskey-LTS). These are NOT the reference C MAC tags -- those
+        # depend on the key, the subkeys K1/K2 and the padding, so they are not
+        # comparable to the bare permutation.
+        # Ref: https://mouha.be/chaskey/
         IN = [0x00010203, 0x04050607, 0x08090A0B, 0x0C0D0E0F]
         OUT_BY_ROUNDS = {
             8:  [0xd5553d2f, 0xb79dab7e, 0x126887ad, 0xb87a8189],

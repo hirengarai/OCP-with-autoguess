@@ -16,48 +16,48 @@ def test_python_imp(cipher): # Generate Python implementation and test it with t
     if not cipher.test_vectors:
         print("warning: no test vector defined!")
         return False
-    imp.test_implementation_python(cipher, cipher.name, cipher.test_vectors[0], cipher.test_vectors[1])
+    for tv in cipher.test_vectors: imp.test_implementation_python(cipher, cipher.name, tv[0], tv[1])
 
 def test_python_unrolled_imp(cipher): # Generate unrolled Python implementation and test it with the test vectors
     imp.generate_implementation(cipher, FILES_DIR / f"{cipher.name}_unrolled.py", "python", True)
     if not cipher.test_vectors:
         print("warning: no test vector defined!")
         return False
-    imp.test_implementation_python(cipher, cipher.name + "_unrolled", cipher.test_vectors[0], cipher.test_vectors[1])
+    for tv in cipher.test_vectors: imp.test_implementation_python(cipher, cipher.name + "_unrolled", tv[0], tv[1])
 
 def test_c_imp(cipher): # Generate C implementation and test it with the test vectors
     imp.generate_implementation(cipher, FILES_DIR / f"{cipher.name}.c", "c")
     if not cipher.test_vectors:
         print("warning: no test vector defined!")
         return False
-    imp.test_implementation_c(cipher, cipher.name, cipher.test_vectors[0], cipher.test_vectors[1])
+    for tv in cipher.test_vectors: imp.test_implementation_c(cipher, cipher.name, tv[0], tv[1])
 
 def test_c_unrolled_imp(cipher): # Generate unrolled C implementation and test it with the test vectors
     imp.generate_implementation(cipher, FILES_DIR / f"{cipher.name}_unrolled.c", "c", True)
     if not cipher.test_vectors:
         print("warning: no test vector defined!")
         return False
-    imp.test_implementation_c(cipher, cipher.name + "_unrolled", cipher.test_vectors[0], cipher.test_vectors[1])
+    for tv in cipher.test_vectors: imp.test_implementation_c(cipher, cipher.name + "_unrolled", tv[0], tv[1])
 
 def test_verilog_imp(cipher): # Generate Verilog implementation and test it with the test vectors
     imp.generate_implementation(cipher, FILES_DIR / f"{cipher.name}.sv", "verilog")
     if not cipher.test_vectors:
         print("warning: no test vector defined!")
         return False
-    # imp.test_implementation_verilog(cipher, cipher.name, cipher.test_vectors[0], cipher.test_vectors[1]) # TO DO
+    # for tv in cipher.test_vectors: imp.test_implementation_verilog(cipher, cipher.name, tv[0], tv[1]) # TO DO
 
 def test_verilog_unrolled_imp(cipher): # Generate unrolled Verilog implementation and test it with the test vectors
     imp.generate_implementation(cipher, FILES_DIR / f"{cipher.name}_unrolled.sv", "verilog", True)
     if not cipher.test_vectors:
         print("warning: no test vector defined!")
         return False
-    # imp.test_implementation_verilog(cipher, cipher.name + "_unrolled", cipher.test_vectors[0], cipher.test_vectors[1]) # TO DO
+    # for tv in cipher.test_vectors: imp.test_implementation_verilog(cipher, cipher.name + "_unrolled", tv[0], tv[1]) # TO DO
 
 def test_visualisation(cipher): # Generate visualisation figure
     vis.generate_figure(cipher, FILES_DIR / f"{cipher.name}.pdf")
 
 
-def test_imp_siphash_permutation():
+def test_imp_chaskey_permutation():
     cipher = CHASKEY_PERMUTATION(r=12)
 
     test_python_imp(cipher)
@@ -78,6 +78,6 @@ def test_imp_siphash_permutation():
 if __name__ == "__main__":
     print(f"=== Implementation Test Log ===")
 
-    test_imp_siphash_permutation()
+    test_imp_chaskey_permutation()
 
     print("All implementation tests completed!")    
