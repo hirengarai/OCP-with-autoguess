@@ -61,18 +61,24 @@ stated through the `known_vars` / `target_vars` / `not_guessed_vars` roles.
 
 ### `goal`
 
+`goal` is which question you are asking AutoGuess — the same slot that
+`"DIFFERENTIALPATH_PROB"` and friends occupy in the other OCP attacks.
+
 | Value | Meaning |
 |---|---|
-| `"GUESSBASIS"` | Search for a guess basis (default) |
-| `"REDUCEBASIS"` | Reduce a supplied basis with the propagation-based reducer. Forces the `propagate` backend, overriding `config_model["model_type"]` |
+| `"GUESSBASIS"` | Find a set of variables whose values, once guessed, let every remaining variable be deduced by propagation (default) |
+| `"REDUCEBASIS"` | Start from the basis passed in `known_vars` and drop the members that turn out to be redundant. Requires `known_vars`, and forces the `propagate` backend regardless of `config_model["model_type"]` |
 
 ### `objective_target`
 
-| Value | Effect |
+| Value | Meaning |
 |---|---|
-| `"EXISTENCE"` | Take whatever basis the encoding yields (default) |
-| `"OPTIMAL"` | Iterate to the minimum guess count |
-| `"AT MOST X"` | Cap the basis at X guesses |
+| `"EXISTENCE"` | One solve: return any guess basis that fits the automatic bound (`maxguess` = number of targets), no minimisation (default) |
+| `"OPTIMAL"` | Repeated solves: iterate the guess count down to the smallest one that is still satisfiable |
+| `"AT MOST X"` | One solve with `maxguess = X`: return any basis of size ≤ X, or nothing if none exists |
+
+Mechanically these set just two AutoGuess flags — `(findmin, maxguess)` =
+`(False, None)`, `(True, None)`, `(False, X)`.
 
 OCP's `"EXACTLY X"` and `"AT LEAST X"` have no AutoGuess counterpart and raise `ValueError`.
 
