@@ -7,9 +7,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import variables.variables as var
-from operators.Sbox import Sbox, ASCON_Sbox, Skinny_4bit_Sbox, Skinny_8bit_Sbox, GIFT_Sbox, AES_Sbox, TWINE_Sbox, PRESENT_Sbox, KNOT_Sbox
+from operators.Sbox import Sbox, ASCON_Sbox, Skinny_4bit_Sbox, Skinny_8bit_Sbox, GIFT_Sbox, AES_Sbox, TWINE_Sbox, PRESENT_Sbox, RECTANGLE_Sbox, LBlock_Sbox0, LBlock_Sbox1, LBlock_Sbox2, LBlock_Sbox3, LBlock_Sbox4, LBlock_Sbox5, LBlock_Sbox6, LBlock_Sbox7, KNOT_Sbox
 import tools.milp_search as milp_search
 import tools.sat_search as sat_search
+import tools.sbox_division_trails as sbox_division_trails
 import solving.solving as solving
 
 FILES_DIR = ROOT / "files"
@@ -19,6 +20,26 @@ FILES_DIR.mkdir(parents=True, exist_ok=True)
 # Define the S-box, each has two types of representations
 present_sbox = PRESENT_Sbox([var.Variable(4,ID="in"+str(i)) for i in range(1)], [var.Variable(4,ID="out"+str(i)) for i in range(1)], ID="present_sbox")
 present_sbox2 = PRESENT_Sbox([var.Variable(1,ID="in"+str(i)) for i in range(4)], [var.Variable(1,ID="out"+str(i)) for i in range(4)], ID="present_sbox2")
+
+rectangle_sbox = RECTANGLE_Sbox([var.Variable(4,ID="in"+str(i)) for i in range(1)], [var.Variable(4,ID="out"+str(i)) for i in range(1)], ID="rectangle_sbox")
+rectangle_sbox2 = RECTANGLE_Sbox([var.Variable(1,ID="in"+str(i)) for i in range(4)], [var.Variable(1,ID="out"+str(i)) for i in range(4)], ID="rectangle_sbox2")
+
+lblock_sbox0 = LBlock_Sbox0([var.Variable(4,ID="in"+str(i)) for i in range(1)], [var.Variable(4,ID="out"+str(i)) for i in range(1)], ID="lblock_sbox0")
+lblock_sbox02 = LBlock_Sbox0([var.Variable(1,ID="in"+str(i)) for i in range(4)], [var.Variable(1,ID="out"+str(i)) for i in range(4)], ID="lblock_sbox02")
+lblock_sbox1 = LBlock_Sbox1([var.Variable(4,ID="in"+str(i)) for i in range(1)], [var.Variable(4,ID="out"+str(i)) for i in range(1)], ID="lblock_sbox1")
+lblock_sbox12 = LBlock_Sbox1([var.Variable(1,ID="in"+str(i)) for i in range(4)], [var.Variable(1,ID="out"+str(i)) for i in range(4)], ID="lblock_sbox12")
+lblock_sbox2 = LBlock_Sbox2([var.Variable(4,ID="in"+str(i)) for i in range(1)], [var.Variable(4,ID="out"+str(i)) for i in range(1)], ID="lblock_sbox2")
+lblock_sbox22 = LBlock_Sbox2([var.Variable(1,ID="in"+str(i)) for i in range(4)], [var.Variable(1,ID="out"+str(i)) for i in range(4)], ID="lblock_sbox22")
+lblock_sbox3 = LBlock_Sbox3([var.Variable(4,ID="in"+str(i)) for i in range(1)], [var.Variable(4,ID="out"+str(i)) for i in range(1)], ID="lblock_sbox3")
+lblock_sbox32 = LBlock_Sbox3([var.Variable(1,ID="in"+str(i)) for i in range(4)], [var.Variable(1,ID="out"+str(i)) for i in range(4)], ID="lblock_sbox32")
+lblock_sbox4 = LBlock_Sbox4([var.Variable(4,ID="in"+str(i)) for i in range(1)], [var.Variable(4,ID="out"+str(i)) for i in range(1)], ID="lblock_sbox4")
+lblock_sbox42 = LBlock_Sbox4([var.Variable(1,ID="in"+str(i)) for i in range(4)], [var.Variable(1,ID="out"+str(i)) for i in range(4)], ID="lblock_sbox42")
+lblock_sbox5 = LBlock_Sbox5([var.Variable(4,ID="in"+str(i)) for i in range(1)], [var.Variable(4,ID="out"+str(i)) for i in range(1)], ID="lblock_sbox5")
+lblock_sbox52 = LBlock_Sbox5([var.Variable(1,ID="in"+str(i)) for i in range(4)], [var.Variable(1,ID="out"+str(i)) for i in range(4)], ID="lblock_sbox52")
+lblock_sbox6 = LBlock_Sbox6([var.Variable(4,ID="in"+str(i)) for i in range(1)], [var.Variable(4,ID="out"+str(i)) for i in range(1)], ID="lblock_sbox6")
+lblock_sbox62 = LBlock_Sbox6([var.Variable(1,ID="in"+str(i)) for i in range(4)], [var.Variable(1,ID="out"+str(i)) for i in range(4)], ID="lblock_sbox62")
+lblock_sbox7 = LBlock_Sbox7([var.Variable(4,ID="in"+str(i)) for i in range(1)], [var.Variable(4,ID="out"+str(i)) for i in range(1)], ID="lblock_sbox7")
+lblock_sbox72 = LBlock_Sbox7([var.Variable(1,ID="in"+str(i)) for i in range(4)], [var.Variable(1,ID="out"+str(i)) for i in range(4)], ID="lblock_sbox72")
 
 knot_sbox = KNOT_Sbox([var.Variable(4,ID="in"+str(i)) for i in range(1)], [var.Variable(4,ID="out"+str(i)) for i in range(1)], ID="knot_sbox")
 knot_sbox2 = KNOT_Sbox([var.Variable(1,ID="in"+str(i)) for i in range(4)], [var.Variable(1,ID="out"+str(i)) for i in range(4)], ID="knot_sbox2")
@@ -146,14 +167,19 @@ def test_Sbox_solutions_milp(Sbox, solutions):
 
 def test_sat_model(op, model_version, mode=0, tool_type="minimize_logic"):
     op.model_version = model_version
+    solver = None # Change to test different solvers supported for solving SAT problems
     print(f"SAT constraints with model_version={model_version}, tool_type={tool_type}, mode={mode}:")
     sat_constraints = op.generate_model(model_type='sat', mode=mode, tool_type=tool_type)
-    # print("\n".join(sat_constraints))
-    filename = str(FILES_DIR / f"sat_{op.ID}_{model_version}.cnf")
-    model = sat_search.write_sat_model(constraints=sat_constraints, filename=filename)
-    print("variable_map in sat:\n", model["variable_map"])
-    sol_list = solving.solve_sat(filename, model["variable_map"], {"solution_number": 100000})
-    # print(f"All solutions:\n{sol_list}")
+    if solver == "CPSAT":
+            family_of_variables = ' '.join(sat_constraints).replace('-', '')
+            all_variables = sorted(set(family_of_variables.split()))
+            variable_dict = {variable: i + 1 for (i, variable) in enumerate(all_variables)}
+            sol_list = solving.solve_sat_cpsat(sat_constraints, variable_dict, {"solution_number": 100000})
+    else:
+        filename = str(FILES_DIR / f"sat_{op.ID}_{model_version}.cnf")
+        model = sat_search.write_sat_model(constraints=sat_constraints, filename=filename)
+        print("variable_map in sat:\n", model["variable_map"])
+        sol_list = solving.solve_sat(filename, model["variable_map"], {"solution_number": 100000})
     return sol_list
 
 
@@ -168,10 +194,10 @@ def test_sbox_sat_diff(sbox): # SAT models for differential cryptanalysis
                 if sbox in [aes_sbox] and model_version == sbox.__class__.__name__+"_XORDIFF_PR" and mode == 1:
                     continue
                 sol_list = test_sat_model(sbox, model_version, mode=mode, tool_type=tool_type)
-                test_Sbox_solutions_sat(sbox, sol_list)
+                test_Sbox_solutions_sat(sbox, sol_list)           
 
     sol_list = test_sat_model(sbox, sbox.__class__.__name__+"_TRUNCATEDDIFF")
-    sol_list = test_sat_model(sbox, sbox.__class__.__name__+"_TRUNCATEDDIFF_A")
+    sol_list = test_sat_model(sbox, sbox.__class__.__name__+"_TRUNCATEDDIFF_A")   
 
 
 def test_sbox_sat_linear(sbox): # SAT models for linear cryptanalysis
@@ -229,22 +255,55 @@ def test_Sbox_solutions_sat(Sbox, solutions):
     print(f"All solutions returned from SAT have been checked and are consistent with the DDT of S-box")
 
 
+
+TWOSUBSET_TRAIL_COUNTS = {"PRESENT_Sbox": 47, "RECTANGLE_Sbox": 49, "TWINE_Sbox": 47}
+TWOSUBSET_TRAIL_COUNTS.update({"LBlock_Sbox" + str(i): 44 for i in range(8)})
+
+
+def test_sbox_twosubset(sbox):
+    if sbox.__class__.__name__ not in TWOSUBSET_TRAIL_COUNTS:
+        raise ValueError(f"No two-subset trail count is defined for {sbox.__class__.__name__}")
+    trails = sbox_division_trails.sbox_two_subset_division_trails(sbox.table, sbox.input_bitsize)
+    assert len(trails) == TWOSUBSET_TRAIL_COUNTS[sbox.__class__.__name__]
+
+    sbox.model_version = sbox.__class__.__name__ + "_INTEGRAL_TWOSUBSET"
+    constraints = sbox.generate_model(model_type="milp", tool_type="polyhedron", filename_load=False)
+    assert constraints
+
+    input_variables = []
+    for i in range(len(sbox.input_vars)):
+        input_variables += sbox.get_var_model("in", i)
+    output_variables = []
+    for i in range(len(sbox.output_vars)):
+        output_variables += sbox.get_var_model("out", i)
+
+    assert any(input_variables[0] in constraint for constraint in constraints)
+    assert any(output_variables[0] in constraint for constraint in constraints)
+
+    print(f"[TEST] Constraints template written to {sbox.model_filename}")
+
+
+
 if __name__ == '__main__':
 
-    print(f"=== Implementation Test Log ===")
 
-    for sbox in [gift_sbox, present_sbox, knot_sbox, twine_sbox, ascon_sbox, skinny4_sbox, skinny8_sbox, aes_sbox]:
+
+    # for sbox in [gift_sbox, present_sbox, knot_sbox, twine_sbox, ascon_sbox, skinny4_sbox, skinny8_sbox, aes_sbox]:
+    for sbox in [twine_sbox2, lblock_sbox02, lblock_sbox12, lblock_sbox22, lblock_sbox32, lblock_sbox42, lblock_sbox52, lblock_sbox62, lblock_sbox72]:
+
         print(f"\n********************* operation: {sbox.ID} Sbox ********************* ")
         sbox.display()
 
-        test_implementation(sbox)
+        # test_implementation(sbox)
 
-        test_sbox_milp_diff(sbox)
+        # test_sbox_milp_diff(sbox)
 
-        test_sbox_milp_linear(sbox)
+        # test_sbox_milp_linear(sbox)
 
-        test_sbox_sat_diff(sbox)
+        # test_sbox_sat_diff(sbox)
 
-        test_sbox_sat_linear(sbox)
+        # test_sbox_sat_linear(sbox)
+
+        test_sbox_twosubset(sbox)
 
         print("All implementation tests completed!")

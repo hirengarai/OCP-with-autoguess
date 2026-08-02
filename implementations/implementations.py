@@ -46,7 +46,7 @@ def generate_implementation(my_prim, filename, language = 'python', unroll = Fal
     
     nbr_rounds = my_prim.nbr_rounds
     
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
     with open(filename, "w") as myfile:
         
         if language == 'c': myfile.write("#include <stdint.h>\n#include <stdio.h>\n\n")

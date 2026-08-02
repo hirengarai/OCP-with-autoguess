@@ -23,12 +23,16 @@ def detect_Sbox(cipher): # Detect and return the first Sbox operator in the ciph
 
 def has_Sbox_with_decimal_weights(cipher, goal):
     Sbox = detect_Sbox(cipher)
-    if Sbox and goal in {'DIFFERENTIALPATH_PROB', 'DIFFERENTIAL_PROB'}:
-        if goal in {'DIFFERENTIALPATH_PROB', 'DIFFERENTIAL_PROB'}:
-            table = Sbox.computeDDT()
-        weights = Sbox.gen_weights(table)
-        return any(not float(w).is_integer() for w in weights)
-    return False
+    if not Sbox:
+        return False
+    if goal in {'DIFFERENTIALPATH_PROB', 'DIFFERENTIAL_PROB'}:
+        table = Sbox.computeDDT()   # differential weights from the DDT
+    elif goal in {'LINEARPATH_CORR', 'LINEARHULL_CORR'}:
+        table = Sbox.computeLAT()   # linear weights from the LAT (|corr| = |LAT|/2^n)
+    else:
+        return False
+    weights = Sbox.gen_weights(table)
+    return any(not float(w).is_integer() for w in weights)
 
 def linear_combinations_bounds(weights, upper_bound, lower_bound=-1): # Enumerate all integer linear combinations of weights such that the sum is within (lower_bound, upper_bound].
     n = len(weights)
@@ -96,17 +100,14 @@ def gen_obj_fun_variables(obj_fun, obj_fun_decimal=False): # In the case of a de
     if not obj_fun_decimal:
         return obj_fun_var_int
     else:
+        # Collect the distinct decimal (non-integer) coefficients across every round and component.
         decimal_vars = []
         for obj_fun_r in obj_fun:
-            if obj_fun_r:
-                terms = [t.strip() for t in obj_fun_r[0].split('+')]
-                break
-        for term in terms:
-            parts = term.split()
-            if len(parts) >= 2:
-                coef, var = parts[0], parts[1]
-                if not float(coef).is_integer():
-                    decimal_vars.append(coef)
+            for obj in obj_fun_r:
+                for term in (t.strip() for t in obj.split('+')):
+                    parts = term.split()
+                    if len(parts) >= 2 and not float(parts[0]).is_integer() and parts[0] not in decimal_vars:
+                        decimal_vars.append(parts[0])
 
         obj_fun_var_dec = {k: [] for k in decimal_vars}
 
@@ -117,7 +118,7 @@ def gen_obj_fun_variables(obj_fun, obj_fun_decimal=False): # In the case of a de
                 for term in terms:
                     parts = term.split()
                     if len(parts) >= 2 and (not float(parts[0]).is_integer()):
-                        obj_fun_var_r_dec[coef].append(parts[1])
+                        obj_fun_var_r_dec[parts[0]].append(parts[1])
             for k in decimal_vars:
                 obj_fun_var_dec[k].append(obj_fun_var_r_dec[k])
         return obj_fun_var_int, [obj_fun_var_dec[k] for k in decimal_vars]

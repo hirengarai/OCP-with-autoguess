@@ -21,8 +21,8 @@ def find_function_index_from_x_coord(in_x_coord, function_x_limits):
 # function that generates the figure describing the primitive  
 def generate_figure(my_prim, filename, display_unused_variables=False, display_copied_variables=True): 
     print("\nGenerating visualisation figure for " + my_prim.name + " in " + str(filename) + " ...", end="", flush=True)
-    os.makedirs(os.path.dirname(filename), exist_ok=True)      
-    
+    os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
+
     var_font_size = 2    # controls the font size of the variables
     op_font_size = 2     # controls the font size of the operators
     x_space_state = 20   # controls the x-axis space between the functions/states

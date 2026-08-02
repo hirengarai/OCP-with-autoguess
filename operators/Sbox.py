@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from operators.operators import Operator, RaiseExceptionVersionNotExisting
 from tools.model_constraints import generate_and_save_constraints, gen_constraints_obj_func_from_template
+from tools.sbox_division_trails import two_subset_sbox_truthtable
 
 ROOT = Path(__file__).resolve().parents[1]  # this file -> operators -> <ROOT>
 BASE_PATH = ROOT / "files/sbox_modeling"
@@ -258,7 +259,31 @@ class Sbox(Operator):  # Generic operator assigning a Sbox relationship between 
             return self._generate_model_diff_linear_p(model_type, tool_type, mode)
         elif self.model_version in [self.__class__.__name__ + "_TRUNCATEDDIFF", self.__class__.__name__ + "_TRUNCATEDDIFF_A", self.__class__.__name__ + "_TRUNCATEDLINEAR", self.__class__.__name__ + "_TRUNCATEDLINEAR_A"] and (not isinstance(self.input_vars[0], list)):
             return self._generate_model_diff_linear_word_truncated(model_type)
+        elif self.model_version in [self.__class__.__name__ + "_INTEGRAL_TWOSUBSET"]:
+            return self._generate_model_integral_twosubset(model_type, tool_type, mode)
         else: RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
+
+    def _generate_model_integral_twosubset(self, model_type, tool_type, mode):
+        if model_type != "milp":
+            RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
+        if self.input_bitsize != self.output_bitsize:
+            raise ValueError(f"{self.__class__.__name__}: INTEGRAL_TWOSUBSET requires equal input and output bitsizes")
+
+        var_in, var_out = [], []
+        for i in range(len(self.input_vars)):
+            var_in += self.get_var_model("in", i)
+        for i in range(len(self.output_vars)):
+            var_out += self.get_var_model("out", i)
+
+        if self.filename_load and os.path.exists(self.model_filename):
+            model_list, _ = gen_constraints_obj_func_from_template(self.model_filename, var_in, var_out)
+        else:
+            ttable = two_subset_sbox_truthtable(self.table, self.input_bitsize)
+            input_variables, output_variables = [f"a{i}" for i in range(len(var_in))], [f"b{i}" for i in range(len(var_out))]
+            generate_and_save_constraints(model_type, tool_type, mode, ttable, input_variables, output_variables, model_filename=self.model_filename)
+            model_list, _ = gen_constraints_obj_func_from_template(self.model_filename, var_in, var_out)
+
+        return model_list
 
     def _generate_model_diff_linear_pr(self, model_type, tool_type, mode):
         var_in, var_out = [], []
@@ -560,6 +585,72 @@ class PRESENT_Sbox(Sbox):           # Operator of the PRESENT 4-bit Sbox
     def __init__(self, input_vars, output_vars, ID = None):
         super().__init__(input_vars, output_vars, 4, 4, ID = ID)
         self.table = [12, 5, 6, 11, 9, 0, 10, 13, 3, 14, 15, 8, 4, 7, 1, 2]
+
+
+class RECTANGLE_Sbox(Sbox):         # Operator of the RECTANGLE 4-bit Sbox
+    def __init__(self, input_vars, output_vars, ID = None):
+        super().__init__(input_vars, output_vars, 4, 4, ID = ID)
+        self.table = [6, 5, 12, 10, 1, 14, 7, 9, 11, 0, 3, 13, 8, 15, 4, 2]
+
+
+class LBlock_Sbox0(Sbox):           # Operator of the LBlock s0 4-bit Sbox
+    def __init__(self, input_vars, output_vars, ID = None):
+        super().__init__(input_vars, output_vars, 4, 4, ID = ID)
+        self.table = [14, 9, 15, 0, 13, 4, 10, 11, 1, 2, 8, 3, 7, 6, 12, 5]
+
+
+class LBlock_Sbox1(Sbox):           # Operator of the LBlock s1 4-bit Sbox
+    def __init__(self, input_vars, output_vars, ID = None):
+        super().__init__(input_vars, output_vars, 4, 4, ID = ID)
+        self.table = [4, 11, 14, 9, 15, 13, 0, 10, 7, 12, 5, 6, 2, 8, 1, 3]
+
+
+class LBlock_Sbox2(Sbox):           # Operator of the LBlock s2 4-bit Sbox
+    def __init__(self, input_vars, output_vars, ID = None):
+        super().__init__(input_vars, output_vars, 4, 4, ID = ID)
+        self.table = [1, 14, 7, 12, 15, 13, 0, 6, 11, 5, 9, 3, 2, 4, 8, 10]
+
+
+class LBlock_Sbox3(Sbox):           # Operator of the LBlock s3 4-bit Sbox
+    def __init__(self, input_vars, output_vars, ID = None):
+        super().__init__(input_vars, output_vars, 4, 4, ID = ID)
+        self.table = [7, 6, 8, 11, 0, 15, 3, 14, 9, 10, 12, 13, 5, 2, 4, 1]
+
+
+class LBlock_Sbox4(Sbox):           # Operator of the LBlock s4 4-bit Sbox
+    def __init__(self, input_vars, output_vars, ID = None):
+        super().__init__(input_vars, output_vars, 4, 4, ID = ID)
+        self.table = [14, 5, 15, 0, 7, 2, 12, 13, 1, 8, 4, 9, 11, 10, 6, 3]
+
+
+class LBlock_Sbox5(Sbox):           # Operator of the LBlock s5 4-bit Sbox
+    def __init__(self, input_vars, output_vars, ID = None):
+        super().__init__(input_vars, output_vars, 4, 4, ID = ID)
+        self.table = [2, 13, 11, 12, 15, 14, 0, 9, 7, 10, 6, 3, 1, 8, 4, 5]
+
+
+class LBlock_Sbox6(Sbox):           # Operator of the LBlock s6 4-bit Sbox
+    def __init__(self, input_vars, output_vars, ID = None):
+        super().__init__(input_vars, output_vars, 4, 4, ID = ID)
+        self.table = [11, 9, 4, 14, 0, 15, 10, 13, 6, 12, 5, 7, 3, 8, 1, 2]
+
+
+class LBlock_Sbox7(Sbox):           # Operator of the LBlock s7 4-bit Sbox
+    def __init__(self, input_vars, output_vars, ID = None):
+        super().__init__(input_vars, output_vars, 4, 4, ID = ID)
+        self.table = [13, 10, 15, 0, 14, 4, 9, 11, 2, 1, 8, 3, 7, 5, 12, 6]
+
+
+class LBlock_Sbox8(Sbox):           # Operator of the LBlock s8 4-bit Sbox
+    def __init__(self, input_vars, output_vars, ID = None):
+        super().__init__(input_vars, output_vars, 4, 4, ID = ID)
+        self.table = [8, 7, 14, 5, 15, 13, 0, 6, 11, 12, 9, 10, 2, 4, 1, 3]
+
+
+class LBlock_Sbox9(Sbox):           # Operator of the LBlock s9 4-bit Sbox
+    def __init__(self, input_vars, output_vars, ID = None):
+        super().__init__(input_vars, output_vars, 4, 4, ID = ID)
+        self.table = [11, 5, 15, 0, 7, 2, 9, 13, 4, 8, 1, 12, 14, 10, 3, 6]
 
 
 class KNOT_Sbox(Sbox):             # Operator of the KNOT 4-bit Sbox

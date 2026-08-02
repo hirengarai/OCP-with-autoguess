@@ -32,10 +32,18 @@ def test_implementation(op):
 
 
 def test_milp_model(op):
-    model_versions = [op.__class__.__name__+"_XORDIFF", op.__class__.__name__+"_LINEAR"]
+    model_versions = [op.__class__.__name__+"_XORDIFF", op.__class__.__name__+"_LINEAR", op.__class__.__name__+"_INTEGRAL_TWOSUBSET"]
     for model_v in model_versions:
         op.model_version = model_v
         milp_constraints = op.generate_model(model_type='milp')
+        if model_v == op.__class__.__name__+"_INTEGRAL_TWOSUBSET":
+            var_in1, var_in2, var_out = op.get_var_model("in", 0), op.get_var_model("in", 1), op.get_var_model("out", 0)
+            expected_constraints = []
+            for i in range(op.input_vars[0].bitsize):
+                i1, i2, o = var_in1[i], var_in2[i], var_out[i]
+                expected_constraints += [f'{o} - {i1} >= 0', f'{o} - {i2} >= 0', f'{o} - {i1} - {i2} <= 0']
+            assert milp_constraints[:-1] == expected_constraints
+            assert milp_constraints[-1] == 'Binary\n' + ' '.join(v for v in var_in1 + var_in2 + var_out)
         print(f"MILP constraints with model_version={model_v}: \n", "\n".join(milp_constraints))
         filename = str(FILES_DIR / f"milp_{op.ID}_{model_v}.lp")
         model = milp_search.write_milp_model(constraints=milp_constraints, obj_fun=op.weight, filename=filename)
@@ -43,16 +51,23 @@ def test_milp_model(op):
         print(f"All solutions:\n{sol_list}\n")
 
 
-def test_sat_model(op):
+def test_sat_model(op): 
     model_versions = [op.__class__.__name__+"_XORDIFF", op.__class__.__name__+"_LINEAR"]
+    solver = None  # Change to test different solvers supported for solving SAT problems
     for model_v in model_versions:
         op.model_version = model_v
         sat_constraints = op.generate_model(model_type='sat')
         print(f"SAT constraints with model_version={model_v}: \n", "\n".join(sat_constraints))
-        filename = str(FILES_DIR / f"sat_{op.ID}_{model_v}.cnf")
-        model = sat_search.write_sat_model(constraints=sat_constraints, filename=filename)
-        print("variable_map in sat:\n", model["variable_map"])
-        sol_list = solving.solve_sat(filename, model["variable_map"], {"solution_number": 100000})
+        if solver == "CPSAT":
+            family_of_variables = ' '.join(sat_constraints).replace('-', '')
+            all_variables = sorted(set(family_of_variables.split()))
+            variable_dict = {variable: i + 1 for (i, variable) in enumerate(all_variables)}
+            sol_list = solving.solve_sat_cpsat(sat_constraints, variable_dict, {"solution_number": 100000})
+        else:
+            filename = str(FILES_DIR / f"sat_{op.ID}_{model_v}.cnf")
+            model = sat_search.write_sat_model(constraints=sat_constraints, filename=filename)
+            print("variable_map in sat:\n", model["variable_map"])
+            sol_list = solving.solve_sat(filename, model["variable_map"], {"solution_number": 100000})
         print(f"All solutions:\n{sol_list}")
 
 

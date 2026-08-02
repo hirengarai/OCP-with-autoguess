@@ -725,7 +725,7 @@ class Matrix(Operator):   # Operator of the Matrix multiplication: appplies the 
         if self.model_version in [self.__class__.__name__ + "_TRUNCATEDDIFF_2"]:
             all_patterns = self.patterns_where_a_star_is_forced_zero()
             patterns = [(xp, yp) for xp, yp, tag in all_patterns if tag == '0']
-            patterns.append(((0, 0, 0, 0), (0, 0, 0, 0)))
+            patterns.append(((0,) * input_words, (0,) * output_words))
 
         elif self.model_version in [self.__class__.__name__ + "_TRUNCATEDLINEAR_2"]:
             mat = copy.deepcopy(self.mat)
@@ -733,7 +733,7 @@ class Matrix(Operator):   # Operator of the Matrix multiplication: appplies the 
             self.mat = mat_trans
             all_patterns = self.patterns_where_a_star_is_forced_zero()
             patterns = [(yp, xp) for xp, yp, tag in all_patterns if tag == '0']
-            patterns.append(((0, 0, 0, 0), (0, 0, 0, 0)))
+            patterns.append(((0,) * input_words, (0,) * output_words))
             self.mat = mat
         else:
             RaiseExceptionVersionNotExisting(str(self.__class__.__name__), self.model_version, model_type)
