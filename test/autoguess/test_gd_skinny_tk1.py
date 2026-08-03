@@ -13,32 +13,43 @@ if str(ROOT_DIR) not in sys.path:
 import primitives.skinny as skinny
 from attacks import attacks
 
-# Build 10 round SKINNY-64-64 cipher (TK1 version) 
-nbr_rounds = 10
-cipher_name = "SKINNY_TK1"
-skinny_version = [64, 64]
 
-# Build cipher
-cipher = skinny.SKINNY_BLOCKCIPHER(nbr_rounds, skinny_version)
+def test_gd_skinny_tk1():
+    # Build 10 round SKINNY-64-64 cipher (TK1 version) 
+    nbr_rounds = 10
+    cipher_name = "SKINNY_TK1"
+    skinny_version = [64, 64]
 
-# Define known variables (input + output state)
-func = cipher.functions["PERMUTATION"]
+    # Build cipher
+    cipher = skinny.SKINNY_BLOCKCIPHER(nbr_rounds, skinny_version)
 
-known_vars = [v.ID for v in func.vars[1][0]] + \
-             [v.ID for v in func.vars[func.nbr_rounds][func.nbr_layers]]
+    # Define known variables (input + output state)
+    func = cipher.functions["PERMUTATION"]
+
+    known_vars = [v.ID for v in func.vars[1][0]] + \
+                 [v.ID for v in func.vars[func.nbr_rounds][func.nbr_layers]]
 
 
-# Run attack
-result = attacks.guess_and_determine_attack(
-    cipher,
-    known_vars=known_vars,
-    objective_target="AT MOST 15",
-    show_mode=1,
-    config_model={
-        "model_type": "sat",
-        "name_prefix": cipher_name,
-        "skip_layers": ["SboxLayer", "AddConstantLayer"],
-        "algebraic_layers": ["MatrixLayer"],
-        "maxsteps": 75,
-    },
-)
+    # Run attack
+    result = attacks.guess_and_determine_attack(
+        cipher,
+        known_vars=known_vars,
+        objective_target="AT MOST 15",
+        show_mode=1,
+        config_model={
+            "model_type": "sat",
+            "name_prefix": cipher_name,
+            "skip_layers": ["SboxLayer", "AddConstantLayer"],
+            "algebraic_layers": ["MatrixLayer"],
+            "maxsteps": 75,
+        },
+    )
+
+    print(f"[TEST] Guess basis ({len(result['guessed_variables'])}): "
+          f"{[v.ID for v in result['guessed_variables']]}")
+    return result
+
+
+if __name__ == '__main__':
+
+    test_gd_skinny_tk1()

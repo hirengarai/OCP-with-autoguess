@@ -3,12 +3,14 @@ This module provides usage examples for the SPECK primitive and SPECK block ciph
 
 1. Generating software implementations and visualizations
 2. Conducting differential cryptanalysis using MILP and SAT methods
-3. Conducting integral cryptanalysis using MILP methods
+3. Conducting guess-and-determine attacks using AutoGuess
+4. Conducting integral cryptanalysis using MILP methods
 
 Note:
 For examples of other ciphers, refer to the following folders:
 - test/implementation
 - test/differential_cryptanalysis
+- test/autoguess
 """
 
 from pathlib import Path
@@ -129,6 +131,23 @@ def test_linear_attack_sat(cipher):
     trails = attacks.linear_attacks(cipher, goal=goal, constraints=constraints, objective_target=objective_target, show_mode=show_mode, config_model=config_model, config_solver=config_solver)
 
 
+# ********************* Guess-and-Determine ********************* #
+def test_gd_attack_sat(cipher, known_vars, objective_target="EXISTENCE", config_model=None, config_solver=None):
+    # Example: default parameters. Refer to test/autoguess/ for more available parameters.
+    goal="GUESSBASIS"
+    show_mode=1
+    if config_model is None:
+        config_model={}
+    else:
+        config_model=dict(config_model)
+    config_model.setdefault("model_type", "sat")
+
+    # Search for the guess basis
+    result = attacks.guess_and_determine_attack(cipher, goal=goal, known_vars=known_vars, objective_target=objective_target, show_mode=show_mode, config_model=config_model, config_solver=config_solver)
+    print(f"[TEST] Guess basis ({len(result['guessed_variables'])}): {[v.ID for v in result['guessed_variables']]}")
+    return result
+
+
 # ********************* Integral Cryptanalysis ********************* #
 def test_integral_attack_milp(cipher, constant_bits, config_model=None, config_solver=None):
     # Example: two-subset integral distinguisher search using MILP.
@@ -171,6 +190,16 @@ if __name__ == "__main__":
     test_diff_attack_sat(cipher)
     test_linear_attack_milp(cipher)
     test_linear_attack_sat(cipher)
+
+    # AES guess-and-determine example: with plaintext and ciphertext known, guessing
+    # 6 more words determines the whole 96-word state. "AT MOST 6" is used instead of
+    # "OPTIMAL" because the minimisation loop takes ~64s to reach the same answer.
+    import primitives.aes as aes
+    aes_cipher = aes.AES_BLOCKCIPHER(2, [128, 128])
+    aes_func = aes_cipher.functions["PERMUTATION"]
+    aes_known = [v.ID for v in aes_func.vars[1][0]] + [v.ID for v in aes_func.vars[aes_func.nbr_rounds][1]]
+    test_gd_attack_sat(aes_cipher, aes_known, objective_target="AT MOST 6",
+                       config_model={"skip_rounds": [2], "maxsteps": 14})
 
     # PRESENT integral attack example. This MILP example is slower than the default demos.
     import primitives.present as present
