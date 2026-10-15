@@ -42,6 +42,10 @@ def test_gd_aes():
         config_solver={"solver": "cadical153"},  # alternatives: glucose4, cadical153
     )
 
+    assert result["status"] == "sat", result["status"]
+    assert result["targets_covered"]
+    assert len(result["guessed_variable_ids"]) <= 11
+    assert len(result["guessed_variables"]) == len(result["guessed_variable_ids"])
     print(f"[TEST] Guess basis ({len(result['guessed_variables'])}): "
           f"{[v.ID for v in result['guessed_variables']]}")
     return result

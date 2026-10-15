@@ -252,6 +252,9 @@ class N_XOR(Operator):
     def __init__(self, input_vars, output_vars, ID = None):
         super().__init__(input_vars, output_vars, ID = ID)
 
+    def gen_autoguess_constr(self, *, algebraic_mode=False):
+        return XOR.gen_autoguess_constr(self, algebraic_mode=algebraic_mode)
+
     def generate_implementation(self, implementation_type='python', unroll=False):
         self.check_supported_implementation(implementation_type)
         expression = " ^ ".join(self.get_var_ID('in', i, unroll) for i in range(len(self.input_vars)))
@@ -329,6 +332,9 @@ class NOT(UnaryOperator):
 
     def __init__(self, input_vars, output_vars, ID = None):
         super().__init__(input_vars, output_vars, ID = ID)
+
+    def gen_autoguess_constr(self):
+        return [f"{self.input_vars[0].ID}, {self.output_vars[0].ID}, KNOWLEDGE_EQ"]
 
     def generate_implementation(self, implementation_type='python', unroll=False):
         self.check_supported_implementation(implementation_type)
@@ -418,8 +424,8 @@ class ConstantXOR(UnaryOperator):
         """
         AutoGuess view of constant addition:
         - We ignore the actual constant value and just keep the wiring.
-        - No algebraic relation, because x ⊕ c = y gives x + y = c (non-homogeneous);
-          algebraic_mode=True returns an empty list rather than lying.
+        - The marker distinguishes mutual determination from equal values.
+        - Algebraic emission of arbitrary word constants is unsupported.
         """
         opid = getattr(self, 'ID', 'CONSTADD')
         try:
@@ -431,10 +437,9 @@ class ConstantXOR(UnaryOperator):
             ) from e
 
         if algebraic_mode:
-            return []
+            raise ValueError("ConstantXOR algebraic_mode requires a bit-level constant encoding")
         else:
-            # In connection relations, treat as rename for structure / connectivity.
-            return [f"{x}, {y}"]
+            return [f"{x}, {y}, KNOWLEDGE_EQ"]
 
 
 class ANDXOR(Operator):

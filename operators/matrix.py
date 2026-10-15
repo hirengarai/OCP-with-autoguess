@@ -14,6 +14,7 @@ from tools.operator_constraints import gen_matrix_constraints, gen_matrix_declar
 from tools.model_templates import generate_and_save_constraints, gen_constraints_obj_func_from_template, instantiate_constraints_template
 from tools.paths import get_matrix_constraints_files_dir
 from itertools import product
+from functools import lru_cache
 
 
 def gf2_multiply(a, b, mod_poly, degree):
@@ -90,6 +91,65 @@ def _is_irreducible_gf2(poly, degree):
         if poly_mod(poly, d) == 0:
             return False
     return True
+
+
+@lru_cache(maxsize=128)
+def _autoguess_linear_rules(matrix, degree=1, polynomial=None):
+    """Minimal determining sets of the coordinates of ``(x, M*x)``.
+
+    A target linear form is determined exactly when it lies in the span of
+    the known forms. This works for arbitrary binary matrices and field
+    matrices; the familiar any-n-coordinates rule follows only for MDS ones.
+    Cache by matrix, since a cipher repeats the same small matrix many times.
+    """
+    import itertools
+
+    n = len(matrix[0])
+    forms = tuple(tuple(int(i == j) for j in range(n)) for i in range(n)) + matrix
+    if polynomial is None:
+        multiply = lambda a, b: a & b
+        inverse = lambda a: 1
+    else:
+        multiply = lru_cache(maxsize=None)(
+            lambda a, b: gf2_multiply(a, b, polynomial, degree)
+        )
+        inverse = lru_cache(maxsize=None)(
+            lambda a: gf2_inv(a, polynomial, degree)
+        )
+
+    def reduce_row(row, basis):
+        row = list(row)
+        for pivot, vector in basis:
+            factor = row[pivot]
+            if factor:
+                row = [a ^ multiply(factor, b) for a, b in zip(row, vector)]
+        return row
+
+    def make_basis(indices):
+        basis = []
+        for idx in indices:
+            row = reduce_row(forms[idx], basis)
+            pivot = next((j for j, value in enumerate(row) if value), None)
+            if pivot is not None:
+                scale = inverse(row[pivot])
+                row = [multiply(value, scale) for value in row]
+                basis.append((pivot, row))
+                basis.sort(key=lambda item: item[0])
+        return basis
+
+    minimal = [[] for _ in forms]
+    rules = []
+    for size in range(0, n + 1):
+        for antecedent in itertools.combinations(range(len(forms)), size):
+            known = frozenset(antecedent)
+            basis = make_basis(antecedent)
+            for target, form in enumerate(forms):
+                if target in known or any(previous <= known for previous in minimal[target]):
+                    continue
+                if not any(reduce_row(form, basis)):
+                    minimal[target].append(known)
+                    rules.append((antecedent, target))
+    return tuple(rules)
 
 
 def generate_binary_matrix_1(degree):
@@ -755,45 +815,58 @@ class Matrix(Operator):
         return model_list
 
     def gen_autoguess_constr(self, *, algebraic_mode=False):
-        """
-        AutoGuess constraint for Matrix multiplication (e.g. MDS layer).
+        """Emit exact linear determination rules, or binary row equations.
 
-        algebraic_mode=True : XOR equations from matrix rows (binary matrices only,
-                              where coefficients are 0 or 1; NOT for GF(2^k) MDS).
-        algebraic_mode=False: full MDS implications — for an n×n matrix, any n of
-                              the 2n variables (inputs + outputs) determine any
-                              remaining variable. Generates C(2n, n) * n implications.
+        MDS matrices retain the usual any-n-of-2n rules. Other matrices use
+        row-span membership, so redundant outputs cannot invent inverses.
+        ``algebraic_mode`` represents XOR equations and rejects field
+        coefficients other than 0/1 rather than silently omitting them.
         """
-        import itertools
-
         in_ids = [v.ID for v in self.input_vars]
         out_ids = [v.ID for v in self.output_vars]
+        if any(not isinstance(value, (int, np.integer)) for row in self.mat for value in row):
+            raise ValueError("AutoGuess Matrix coefficients must be integers")
+        matrix = tuple(tuple(int(value) for value in row) for row in self.mat)
+        binary = all(value in (0, 1) for row in matrix for value in row)
+        if not binary and self.polynomial is None:
+            raise ValueError("AutoGuess Matrix requires binary coefficients or a GF(2^w) polynomial")
 
         if algebraic_mode:
+            if not binary:
+                raise ValueError(
+                    "AutoGuess Matrix algebraic_mode supports binary coefficients only; "
+                    "use connection mode for GF(2^w) matrices such as AES MixColumns"
+                )
             rels = []
             for row_idx, out_var in enumerate(out_ids):
-                if row_idx >= len(self.mat):
-                    continue
                 xor_inputs = [
                     in_ids[col]
                     for col in range(len(in_ids))
-                    if col < len(self.mat[row_idx]) and self.mat[row_idx][col] == 1
+                    if matrix[row_idx][col] == 1
                 ]
-                if len(xor_inputs) == 1:
-                    rels.append(f"{xor_inputs[0]}, {out_var}, NONRENAME")
-                elif len(xor_inputs) > 1:
-                    rels.append(f"{', '.join(xor_inputs)}, {out_var}")
+                rels.append(" + ".join(xor_inputs + [out_var] + ([] if xor_inputs else ["0"])))
             return rels
 
-        n = len(in_ids)
+        degree, polynomial = 1, None
+        if not binary:
+            widths = {var.bitsize for var in self.input_vars + self.output_vars}
+            if len(widths) != 1:
+                raise ValueError("AutoGuess Matrix requires equal word widths for field coefficients")
+            degree = widths.pop()
+            polynomial = _normalize_mod_poly(self.polynomial, degree)
+            if not _is_irreducible_gf2(polynomial, degree):
+                raise ValueError("AutoGuess Matrix requires an irreducible GF(2^w) polynomial")
+            if any(value < 0 or value >= 1 << degree for row in matrix for value in row):
+                raise ValueError("AutoGuess Matrix coefficient outside GF(2^w)")
         all_vars = in_ids + out_ids
         rels = []
-        for combo in itertools.combinations(all_vars, n):
-            known = set(combo)
-            lhs = ", ".join(combo)
-            for target in all_vars:
-                if target not in known:
-                    rels.append(f"{lhs} => {target}")
+        for antecedent, target in _autoguess_linear_rules(matrix, degree, polynomial):
+            if antecedent:
+                lhs = ", ".join(all_vars[i] for i in antecedent)
+                rels.append(f"{lhs} => {all_vars[target]}")
+            else:
+                # A singleton symmetric relation determines a constant output.
+                rels.append(all_vars[target])
         return rels
 
 
@@ -814,6 +887,35 @@ class GF2Linear_Trans(UnaryOperator):
             raise ValueError("GF2Linear_Trans: the matrix should be square.")
         self.mat = mat
         self.constants = constants
+
+    def gen_autoguess_constr(self, *, treat_as_nonrename=False):
+        """Word determination through a binary linear/affine transform.
+
+        A full-rank transform is a knowledge equivalence, not equal word
+        values. Singular transforms only determine the output from the input.
+        """
+        size = self.input_vars[0].bitsize
+        if len(self.mat) != size or any(len(row) != size for row in self.mat):
+            raise ValueError("GF2Linear_Trans matrix dimension must match the word width")
+        if any(value not in (0, 1) for row in self.mat for value in row):
+            raise ValueError("GF2Linear_Trans requires binary coefficients")
+        rows = [sum(int(value) << col for col, value in enumerate(row)) for row in self.mat]
+        rank = 0
+        for col in range(size):
+            pivot = next((i for i in range(rank, size) if rows[i] & (1 << col)), None)
+            if pivot is not None:
+                rows[rank], rows[pivot] = rows[pivot], rows[rank]
+                for i in range(rank + 1, size):
+                    if rows[i] & (1 << col):
+                        rows[i] ^= rows[rank]
+                rank += 1
+        x, y = self.input_vars[0].ID, self.output_vars[0].ID
+        if rank == size:
+            marker = "NONRENAME" if treat_as_nonrename else "KNOWLEDGE_EQ"
+            return [f"{x}, {y}, {marker}"]
+        if rank == 0:
+            return [y]
+        return [f"{x} => {y}"]
 
 
     def generate_implementation(self, implementation_type='python', unroll=False):

@@ -1,5 +1,56 @@
 # Changelog
 
+## 2026-10-15 — AutoGuess correctness and Sage-free validation
+
+- Use upstream's `time_limit` name consistently for the shared search budget:
+  accept it in OCP `config_solver` and `run_autoguess`, and expose it in results.
+  Existing `timelimit` API/configuration spelling, `time_limit_seconds` result
+  field, and CLI `--timelimit` / `-tl` remain supported. Explicit conflicting
+  configuration keys are rejected.
+- Complete the time-limited search workflow: share one AutoGuess deadline across
+  setup and optimization attempts, retain the best validated basis after
+  timeout, and return `unknown` when no complete basis was found. Results expose
+  the stopping reason, timeout flag, elapsed time, and requested limit. Default
+  timed SAT uses interruptible Glucose; explicitly unsupported backends fail
+  clearly. Preprocessing/model creation check the deadline cooperatively;
+  OCP relation generation precedes the budget and final reporting may finish
+  afterward.
+- Add native CP and SMT regression suites using actual MiniZinc CP-SAT,
+  Gecode, Chuffed, PySMT/Z3, and direct Z3 execution. Native runs exposed and
+  fixed a PySMT accumulator shadowing Python's `sum`, and MiniZinc interpreting
+  a zero time limit as unlimited. Optional dependency versions are recorded
+  separately from the Sage-free runtime requirements.
+- Add an isolated oracle for direct comparison with compiled Sage mathematical
+  libraries, distributed by PassageMath. OCP does not depend on that oracle
+  environment in normal operation. Native arithmetic, monomial orders, matrix
+  elimination, 98 Macaulay systems, and 24 workflows using the pinned upstream
+  mathematical methods agree with the Sage-free implementation.
+- Return structured results from the current solver invocation, including
+  `status`, `optimal`, target coverage, and original variable IDs. Reports are
+  written atomically and are no longer parsed to infer search success.
+- Resolve single `Layered_Function` objects correctly; reject invalid role IDs;
+  keep removable bases distinct from fixed knowns; preserve caller paths and
+  working directories, including after direct vendor imports.
+- Derive matrix determination rules from linear rank, model SKINNY tweakey
+  LFSRs, preserve value distinctions in algebraic models, and avoid inventing
+  inverse rules when aliases create repeated operands. Unsupported operators
+  now fail explicitly. Binary matrix algebraic mode emits actual equations and
+  rejects unsupported field coefficients.
+- Repair zero/weighted minimization, reduction, optional backend bounds,
+  known/forbidden overlap, timer cleanup, and timeout/optimality reporting.
+  Automatic guess bounds use total unknown-variable cost rather than target count.
+- Normalize Boolean polynomials exactly, reject malformed input, correct
+  `degrevlex`, prevent auxiliary-name collisions, and handle empty/zero systems.
+  Independent arithmetic/elimination checks reproduce the paper's small
+  preprocessing example (3, 2, then 1 guesses). The Gröbner search backend
+  remains unavailable without Sage.
+- Correct the older TK3 example to target combined tweakey subkeys. Examples
+  now assert status, target coverage, guess bounds, and complete ID resolution.
+  New focused regressions avoid overwriting saved cipher artifacts.
+- Set the PRESENT example's propagation depth to 11: its historical 60-guess
+  basis reaches 94/96 targets at depth 10 and all targets at depth 11 under the
+  corrected algebraic model. Historical files remain available for comparison.
+
 ## 2026-08-02 — guess-and-determine follows the OCP attack convention
 
 **Breaking.** `guess_and_determine_attack` / `search_guess_basis` now take the

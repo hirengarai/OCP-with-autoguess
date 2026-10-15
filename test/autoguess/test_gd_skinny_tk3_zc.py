@@ -1,5 +1,5 @@
 """
-Test Autoguess on SKINNY-64-128 (TK2)
+Test Autoguess on SKINNY-64-192 (TK3)
 """
 import sys
 from pathlib import Path
@@ -14,7 +14,7 @@ from attacks import attacks
 
 
 def test_gd_skinny_tk3_zc():
-    # Build 10 round SKINNY-64-128 cipher (TK2 version)
+    # Build the SKINNY-64-192 cipher (TK3 version).
     nbr_rounds = 23
     cipher_name = "SKINNY_TK3"
     skinny_version = [64, 192]
@@ -24,7 +24,7 @@ def test_gd_skinny_tk3_zc():
     cipher = skinny.SKINNY_BLOCKCIPHER(nbr_rounds, skinny_version)
 
     KS = cipher.functions["KEY_SCHEDULE"]
-    # Target subkeys from skinnytk2zckb (r=15..19 in 0-based paper -> r=16..20 here).
+    # Combined subkeys, r=17..22 in the paper's zero-based indexing.
     target_specs = {
         18: [48+0],
         19: [48+3, 48+4],
@@ -54,6 +54,10 @@ def test_gd_skinny_tk3_zc():
             "maxsteps": 12,
         },
     )
+    assert result["status"] == "sat", result["status"]
+    assert result["targets_covered"]
+    assert len(result["guessed_variable_ids"]) <= 25
+    assert len(result["guessed_variables"]) == len(result["guessed_variable_ids"])
     print(f"[TEST] Guess basis ({len(result['guessed_variables'])}): "
           f"{[v.ID for v in result['guessed_variables']]}")
     return result

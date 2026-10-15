@@ -300,6 +300,8 @@ def generate_relations(
 
     # Step 5: Clean (or skip)
     if not enable_cleaning:
+        # Internal markers control aliasing only; they are not AutoGuess IDs.
+        formatted = cleaner._strip_nonrename_markers(formatted)
         _save_lines(formatted, output_file)
         return formatted
 

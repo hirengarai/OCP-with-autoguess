@@ -211,7 +211,7 @@ def _propagate_quiet(symmetric_relations, implication_relations, known_variables
     return known_set
 
 
-def reduce_basis(parsed_data, basis_variables):
+def reduce_basis(parsed_data, basis_variables, max_steps=None):
     """
     Given a known guess basis, try to reduce it by testing subsets of
     decreasing size via propagation.
@@ -234,10 +234,15 @@ def reduce_basis(parsed_data, basis_variables):
     target_variables = parsed_data.get("target_variables", all_variables)
     problem_name = parsed_data.get("problem_name", "")
 
-    # Separate file-level known vars from the basis being reduced
+    # The dispatcher parses file-known variables separately from the optional
+    # guess basis. A known variable stays fixed even if repeated in that basis.
     file_known = parsed_data.get("known_variables", [])
-    basis_set = set(basis_variables)
-    fixed_known = [v for v in file_known if v not in basis_set]
+    fixed_known = list(file_known)
+    basis_variables = list(dict.fromkeys(v for v in basis_variables if v not in fixed_known))
+    from core.solverresult import knowledge_trace
+
+    def closure(initial):
+        return knowledge_trace(parsed_data, initial, max_steps)[0]
 
     target_set = set(target_variables)
 
@@ -265,8 +270,7 @@ def reduce_basis(parsed_data, basis_variables):
     print(separator)
 
     # First verify the full basis is indeed a guess basis
-    full_known = _propagate_quiet(symmetric_relations, implication_relations,
-                                  fixed_known + basis_variables, all_variables)
+    full_known = closure(fixed_known + basis_variables)
     if not target_set.issubset(full_known):
         uncovered = sorted(target_set - full_known)
         print('\nERROR: The supplied basis is NOT a valid guess basis!')
@@ -280,7 +284,7 @@ def reduce_basis(parsed_data, basis_variables):
     best_basis = list(basis_variables)
     total_checked = 0
 
-    for drop in range(1, n):
+    for drop in range(1, n + 1):
         subset_size = n - drop
         n_subsets = comb(n, subset_size)
         print('\n--- Trying subsets of size %d  (%d candidates) ---' % (subset_size, n_subsets))
@@ -289,8 +293,7 @@ def reduce_basis(parsed_data, basis_variables):
         for idx, subset in enumerate(combinations(basis_variables, subset_size), 1):
             total_checked += 1
             candidate = list(subset)
-            known_after = _propagate_quiet(symmetric_relations, implication_relations,
-                                           fixed_known + candidate, all_variables)
+            known_after = closure(fixed_known + candidate)
             if target_set.issubset(known_after):
                 print('  [%d/%d] {%s}  =>  VALID guess basis!' % (idx, n_subsets, ', '.join(candidate)))
                 if found_at_level is None:

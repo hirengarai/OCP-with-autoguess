@@ -92,6 +92,10 @@ class Macaulay:
     count = 0
     
     def __init__(self, inputfile, outputfile, D=2, term_ordering='deglex'):
+        if not isinstance(D, int) or D < 0:
+            raise ValueError("D must be a non-negative integer")
+        if term_ordering not in ('deglex', 'degrevlex'):
+            raise ValueError("term_ordering must be 'deglex' or 'degrevlex'")
         Macaulay.count += 1
         self.inputfile = inputfile
         self.outputfile = outputfile
@@ -112,12 +116,12 @@ class Macaulay:
         # 1) Parse each algebraic relation into GF2Poly
         self.polynomials = [parse_gf2poly(line) for line in lines]  # list of GF2Poly
 
-        # 2) Collect all variable names from monomials
-        vars_set = set()
-        for poly in self.polynomials:
-            for mono in poly.monomials:    # mono is a frozenset of var-names
-                vars_set.update(mono)
-        self.variable_names = first_seen_var_names(lines)
+        # Names canceled modulo 2 (or used only in a zeroth power) are not
+        # polynomial variables and must not create unrelated lifting columns.
+        used_variables = {name for poly in self.polynomials
+                          for monomial in poly.monomials for name in monomial}
+        self.variable_names = [name for name in first_seen_var_names(lines)
+                               if name in used_variables]
     
     
     def build_macaulay_polynomials(self):
@@ -181,7 +185,7 @@ class Macaulay:
         degrees = [poly_degree(f) for f in self.polynomials]
         
 
-        if max(degrees) > 1:
+        if degrees and max(degrees) > 1:
             min_deg = min(degrees)
             if self.D < min_deg:
                 self.D = min_deg
@@ -199,8 +203,9 @@ class Macaulay:
 
         # Apply the chosen term ordering
         if self.term_ordering == 'degrevlex':
-            # Degree reverse lexicographic: by total degree (descending), then reverse lex (descending)
-            self.mons = sorted(exps, key=lambda e: (sum(e), tuple(reversed(e))), reverse=True)
+            # In Sage's degrevlex order, a smaller exponent at the LAST
+            # differing variable is the larger monomial (e.g. xy > xz > yz).
+            self.mons = sorted(exps, key=lambda e: (sum(e), tuple(-v for v in reversed(e))), reverse=True)
         else:  # 'deglex' or default
             # Degree lexicographic: by total degree (descending), then lex (descending)
             self.mons = sorted(exps, key=lambda e: (sum(e), e), reverse=True)
@@ -228,12 +233,7 @@ class Macaulay:
         print('Gaussian elimination started - %s' % datetime.now())
         packed, ncols = _pack_bits_to_uint64(self.macaulay_matrix)
         validate_packed_gf2_u64(packed, ncols)
-        # Warm up JIT so timing reflects steady-state performance
-        rref_gf2_u64(packed.copy())
-
         t0 = time.time()
-        packed, ncols = _pack_bits_to_uint64(self.macaulay_matrix)
-        validate_packed_gf2_u64(packed, ncols)
         rref_gf2_u64(packed)
 
         pivots = _pivot_columns_from_packed(packed, ncols)

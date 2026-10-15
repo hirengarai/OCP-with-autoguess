@@ -50,6 +50,8 @@ def read_relation_file(path, preprocess=1, D=2, log=0, extra_known=None):
     Reads a relation file in GD format and parses it into a systems of connection relations
     """
 
+    if preprocess not in (0, 1):
+        raise ValueError("preprocess must be 0 or 1")
     rnd_string_tmp = "%030x" % random.randrange(16**30)
     contents = None
     try:
@@ -67,6 +69,9 @@ def read_relation_file(path, preprocess=1, D=2, log=0, extra_known=None):
 
     dummy_mapping = {}
     connection_relations = sections.get("connection relations", "")
+    reserved_variables = set(parse_connection_relations(connection_relations)[2])
+    for role in ("known", "target", "not guessed", "weights"):
+        reserved_variables.update(line.split()[0] for line in sections.get(role, "").splitlines() if line.strip())
     algebraic_relations = sections.get("algebraic relations", "")
     algebraic_equations_file = os.path.join(
         TEMP_DIR, "algebraic_equations_%s.txt" % rnd_string_tmp
@@ -82,7 +87,7 @@ def read_relation_file(path, preprocess=1, D=2, log=0, extra_known=None):
             TEMP_DIR, "macaulay_basis_%s.txt" % rnd_string_tmp
         )
         _macaulay_path = str(pathlib.Path(__file__).parent / "macaulay.py")
-        subprocess.call(
+        subprocess.run(
             [
                 sys.executable,
                 _macaulay_path,
@@ -94,7 +99,8 @@ def read_relation_file(path, preprocess=1, D=2, log=0, extra_known=None):
                 "degrevlex",
                 "-D",
                 str(D),
-            ]
+            ],
+            check=True,
         )
         elapsed_time = time.time() - starting_time
         print("Preprocessing finished in %0.4f seconds" % elapsed_time)
@@ -102,39 +108,36 @@ def read_relation_file(path, preprocess=1, D=2, log=0, extra_known=None):
             with open(macaulay_basis_file, "r") as groebner_basis_file:
                 groebner_basis = groebner_basis_file.read()
         except IOError:
-            print(macaulay_basis_file + " is not accessible!")
-            sys.exit()
+            raise RuntimeError(macaulay_basis_file + " is not accessible!")
         algebraic_relations += "\n" + groebner_basis
         # algebraic_relations = groebner_basis
         if connection_relations == "":
             connection_relations, dummy_mapping = (
                 algebraic_relations_to_connection_relations(
-                    algebraic_relations.split("\n")
+                    algebraic_relations.split("\n"), reserved_variables=reserved_variables
                 )
             )
         else:
             cr, dummy_mapping = algebraic_relations_to_connection_relations(
-                algebraic_relations.split("\n")
+                algebraic_relations.split("\n"), reserved_variables=reserved_variables
             )
             connection_relations += "\n" + cr
     elif algebraic_relations != "" and preprocess == 0:
         if connection_relations == "":
             connection_relations, dummy_mapping = (
                 algebraic_relations_to_connection_relations(
-                    algebraic_relations.split("\n")
+                    algebraic_relations.split("\n"), reserved_variables=reserved_variables
                 )
             )
         else:
             cr, dummy_mapping = algebraic_relations_to_connection_relations(
-                algebraic_relations.split("\n")
+                algebraic_relations.split("\n"), reserved_variables=reserved_variables
             )
             connection_relations += "\n" + cr
     symmetric_relations, implication_relations, variables = parse_connection_relations(
         connection_relations
     )
-    known_variables = sections.get("known", [])
-    if known_variables != []:
-        known_variables = known_variables.split("\n")
+    known_variables = [v.strip() for v in sections.get("known", "").splitlines() if v.strip()]
     known_variables.extend([rel[0] for rel in symmetric_relations if len(rel) == 1])
     known_variables = ordered_set(known_variables)
     if extra_known:
@@ -142,22 +145,30 @@ def read_relation_file(path, preprocess=1, D=2, log=0, extra_known=None):
             if v not in known_variables:
                 known_variables.append(v)
     symmetric_relations = [rel for rel in symmetric_relations if len(rel) != 1]
-    target_variables = sections.get("target", [])
-    if target_variables != []:
-        target_variables = target_variables.split("\n")
-    else:
-        target_variables = variables
+    target_variables = [v.strip() for v in sections.get("target", "").splitlines() if v.strip()]
+    target_variables = ordered_set(target_variables or variables)
     weights_section = sections.get("weights", [])
     target_weights = None
     if weights_section != []:
         target_weights = dict()
         weights_section = weights_section.split("\n")
         for element in weights_section:
-            var, weight = element.split(" ")
+            if not element.strip():
+                continue
+            var, weight = element.split()
             target_weights[var] = int(weight)
-    notguessed_variables = sections.get("not guessed", [])
-    if notguessed_variables != []:
-        notguessed_variables = notguessed_variables.split("\n")
+            if target_weights[var] < 0:
+                raise ValueError("Guess weights must be nonnegative")
+    notguessed_variables = [v.strip() for v in sections.get("not guessed", "").splitlines() if v.strip()]
+    universe = set(variables)
+    for role, names in (("known", known_variables), ("target", target_variables),
+                        ("not guessed", notguessed_variables), ("weights", target_weights or {})):
+        missing = sorted(set(names) - universe)
+        if missing:
+            raise ValueError("Variables in %s are absent from relations: %s" % (role, ", ".join(missing)))
+    # Being known is compatible with being forbidden as a guess. State zero
+    # represents both kinds of knowledge, so only unknown variables get a zero.
+    notguessed_variables = [v for v in ordered_set(notguessed_variables) if v not in known_variables]
     parsed_data = {
         "problem_name": problem_name,
         "variables": variables,
@@ -295,13 +306,22 @@ def parse_connection_relations(connection_relations):
     connection_relations = connection_relations.replace(" ", "")
     connection_relations = connection_relations.split("\n")
     for rel in connection_relations:
+        rel = "".join(rel.split())
+        if not rel:
+            continue
         # Extract implication relations
         if "=>" in rel:
+            if rel.count("=>") != 1:
+                raise ValueError("Malformed implication relation: " + rel)
             rel = re.split(",|=>", rel)
+            if any(not variable for variable in rel):
+                raise ValueError("Empty variable in implication relation")
             implication_relations.append(rel)
         # Extract symmetric relations
         else:
             rel = rel.split(",")
+            if any(not variable for variable in rel):
+                raise ValueError("Empty variable in symmetric relation")
             symmetric_relations.append(rel)
         variables.extend(rel)
     variables = ordered_set(variables)
@@ -377,7 +397,7 @@ def degree_of_monomial(monomial):
     return len(vars)
 
 
-def algebraic_relations_to_connection_relations(algebraic_relations):
+def algebraic_relations_to_connection_relations(algebraic_relations, reserved_variables=()):
     """
     Generate the connection relations derived from the given algebraic relations by introducing new variables
     It currently work for boolean polynomial relations merely
@@ -389,13 +409,21 @@ def algebraic_relations_to_connection_relations(algebraic_relations):
 
     connection_relations = []
     dummy_mapping = dict()
-    if algebraic_relations[-1] == "":
-        algebraic_relations[-1:] = []
-    algebraic_relations = [poly.replace(" ", "") for poly in algebraic_relations]
+    from core.gf2poly import parse_gf2poly
+    normalized = []
+    for expression in algebraic_relations:
+        if not expression.strip():
+            continue
+        polynomial = parse_gf2poly(expression)
+        if polynomial.monomials == {frozenset()}:
+            raise ValueError("Inconsistent algebraic equation: 1 = 0")
+        if polynomial:
+            normalized.append(str(polynomial).replace(" ", ""))
+    algebraic_relations = normalized
     all_monomials = get_monomials_from_list_of_polys(algebraic_relations)
     algebraic_variables = get_variables_from_list_of_monomials(all_monomials)
     # Generate a random prefix and ensure it doesn't collide with existing variable names
-    algebraic_variables_set = set(algebraic_variables)
+    algebraic_variables_set = set(algebraic_variables) | set(reserved_variables)
     dummy_vars_prefix = random_prefix_generator(4)
     while any(v.startswith(dummy_vars_prefix) for v in algebraic_variables_set):
         dummy_vars_prefix = random_prefix_generator(4)

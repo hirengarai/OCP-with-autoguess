@@ -24,6 +24,7 @@ from core.parsesolution import parse_solver_solution
 from gurobipy import *
 from core.inputparser import read_relation_file
 import os
+import math
 import time
 import random
 from core.parsesolution import parse_solver_solution
@@ -196,7 +197,7 @@ class ReduceGDtoMILP:
         unknown_init_state_vars = [step_var(v, 0) for v in unknown_vars]
         if self.target_weights != None:
             LHS1 = [
-                "%d %s" % (self.target_weights[v], step_var(v, 0)) for v in unknown_vars
+                "%d %s" % (self.target_weights.get(v, 1), step_var(v, 0)) for v in unknown_vars
             ]
             LHS1 = " + ".join(LHS1)
         else:
@@ -453,6 +454,12 @@ class ReduceGDtoMILP:
         """
         This method uses Gurobi to solve the obtained MILP problem
         """
+        self.optimal = False
+        self.timed_out = False
+        self.termination_reason = "unknown"
+        self.lower_bound = None
+        if self.time_limit < 0 and self.time_limit != -1:
+            raise ValueError("Time limit must be nonnegative or -1")
         lpfile_path = os.path.join(TEMP_DIR, self.lpfile_name)
         self.milp_model = read(lpfile_path)
         if self.log == 0:
@@ -461,6 +468,11 @@ class ReduceGDtoMILP:
             self.milp_model.params.TimeLimit = self.time_limit
         # 0 (default: Gurobi strikes a balance between finding feasible solution and proving the optimality)
         self.milp_model.params.MIPFocus = 0
+        if self.direction == "min":
+            # Guess costs are integers. Require an exact bound before claiming
+            # optimality, including inputs with large non-unit weights.
+            self.milp_model.params.MIPGap = 0
+            self.milp_model.params.MIPGapAbs = 0
         # 1 (quickly find a feasible solution)
         # 2 (proving optimality is in priority)
         # 3 (focus on the best bound)
@@ -470,56 +482,75 @@ class ReduceGDtoMILP:
         start_time = time.time()
         ##########################
         ##########################
-        self.milp_model.optimize()
+        interrupted = False
+        try:
+            self.milp_model.optimize()
+        except KeyboardInterrupt:
+            # Native Gurobi normally returns INTERRUPTED, but retain any
+            # incumbent if Python receives the interrupt itself.
+            interrupted = True
+        self.optimal = self.direction == "min" and self.milp_model.Status == GRB.OPTIMAL
+        self.timed_out = self.milp_model.Status == GRB.TIME_LIMIT
+        if interrupted or self.milp_model.Status == GRB.INTERRUPTED:
+            self.optimal = False
+            self.termination_reason = "interrupted"
+        elif self.timed_out:
+            self.termination_reason = "time_limit"
+        elif self.optimal:
+            self.termination_reason = "optimal"
+        elif self.milp_model.Status == GRB.INFEASIBLE:
+            self.termination_reason = "infeasible"
+        elif self.milp_model.SolCount:
+            self.termination_reason = "solution_found"
+        if self.direction == "min":
+            try:
+                bound = float(self.milp_model.ObjBound)
+                if math.isfinite(bound):
+                    self.lower_bound = bound
+            except (AttributeError, GurobiError):
+                # Some early stops do not expose a native objective bound.
+                pass
         ##########################
         ##########################
         elapsed_time = time.time() - start_time
         print("Solving process was finished after %0.2f seconds" % elapsed_time)
 
-        if (
-            self.milp_model.Status == GRB.OPTIMAL
-            or self.milp_model.Status == GRB.INTERRUPTED
-            or self.milp_model.Status == GRB.TIME_LIMIT
-        ):
-            if self.milp_model.SolCount == 0:
-                print(
-                    "No solution found! Perhaps, I need more time to solve this problem."
-                )
-                return
+        if self.milp_model.SolCount > 0:
+            # SolCount, rather than a small allowlist of stopping statuses,
+            # determines whether a usable current-run incumbent exists.
             self.objval = self.milp_model.objval
             self.solutions = [0] * (self.max_steps + 1)
             for step in range(self.max_steps + 1):
                 state_vars = [step_var(v, step) for v in self.variables]
                 state_values = list(
-                    map(lambda x: int(self.milp_model.getVarByName(x).Xn), state_vars)
+                    map(lambda x: int(round(self.milp_model.getVarByName(x).X)), state_vars)
                 )
                 self.solutions[step] = dict(zip(state_vars, state_values))
-            if self.milp_model.SolCount == 0:
-                print("Sorry! There is no solution to be parsed.\nTry again please.")
-                return
-            else:
-                if self.log == 1:
-                    gurobi_solution_file_name = "grbsol_mg%d_ms%d_%s.sol" % (
-                        self.max_guess,
-                        self.max_steps,
-                        self.direction,
-                    )
-                    grb_solution_file_path = os.path.join(
-                        TEMP_DIR, gurobi_solution_file_name
-                    )
-                    self.milp_model.write(grb_solution_file_path)
-                parse_solver_solution(self)
-                if self.draw_graph:
-                    draw_graph(
-                        self.vertices,
-                        self.edges,
-                        self.known_variables,
-                        self.guessed_vars,
-                        self.output_dir,
-                        self.tikz,
-                        self.dglayout,
-                    )
+            if self.log == 1:
+                gurobi_solution_file_name = "grbsol_mg%d_ms%d_%s.sol" % (
+                    self.max_guess,
+                    self.max_steps,
+                    self.direction,
+                )
+                grb_solution_file_path = os.path.join(
+                    TEMP_DIR, gurobi_solution_file_name
+                )
+                self.milp_model.write(grb_solution_file_path)
+            parse_solver_solution(self)
+            if self.draw_graph:
+                draw_graph(
+                    self.vertices,
+                    self.edges,
+                    self.known_variables,
+                    self.guessed_vars,
+                    self.output_dir,
+                    self.tikz,
+                    self.dglayout,
+                )
+            return True
         elif self.milp_model.Status == GRB.INFEASIBLE:
             print("The obtained milp model is infeasible")
+            return False
         else:
-            print("Unknown error!")
+            print("No solution found (stopping reason: %s)." % self.termination_reason)
+            return None

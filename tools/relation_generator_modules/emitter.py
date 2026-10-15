@@ -18,6 +18,7 @@ Key concepts:
 """
 
 import inspect
+import re
 import warnings
 from typing import Any, Dict, Iterable, List, Literal, Optional, Set
 
@@ -156,7 +157,7 @@ def _layer_matches_filter(ops: list, filters: Set[str]) -> bool:
     """Check if ANY operation in a layer matches a filter (for whole-layer skipping)."""
     for op in ops:
         clsname = op.__class__.__name__
-        opid = getattr(op, "ID", "")
+        opid = getattr(op, "ID", "") or ""
         if _matches_filter(clsname, opid, filters):
             return True
     return False
@@ -173,10 +174,9 @@ _PERMUTATION_EQ_PREFIXES = tuple(
 def _infer_sbox_form(op: Any) -> SboxForm:
     """Pick the S-box emission form from the wiring shape.
 
-    "rename"      — one wide variable in, one wide variable out (each strictly
-                    multi-bit). The cipher is treating the S-box as a single
-                    bijection on a multi-bit word; emit a 2-variable line that
-                    the cleaner can collapse safely (the S-box is bijective).
+    "rename"      — one equal-width multi-bit variable in/out and a verified
+                    bijective lookup table. The cleaner may merge the two
+                    knowledge states in a connection-only model.
     "implication" — anything else (multiple 1-bit vars, mixed widths, etc).
                     The cipher has unpacked the S-box into bit-level wiring;
                     each output bit depends nonlinearly on all inputs, so emit
@@ -184,11 +184,16 @@ def _infer_sbox_form(op: Any) -> SboxForm:
     """
     in_vars = op.input_vars
     out_vars = op.output_vars
+    table = getattr(op, "table", None)
     if (
         len(in_vars) == 1
         and len(out_vars) == 1
         and getattr(in_vars[0], "bitsize", 1) > 1
         and getattr(out_vars[0], "bitsize", 1) > 1
+        and in_vars[0].bitsize == out_vars[0].bitsize
+        and table is not None
+        and len(table) == 1 << in_vars[0].bitsize
+        and len(set(table)) == len(table)
     ):
         return "rename"
     return "implication"
@@ -229,7 +234,7 @@ def _call_gen_autoguess(
     gen = op.gen_autoguess_constr
     supported = set(inspect.signature(gen).parameters.keys())
     clsname = op.__class__.__name__
-    opid = getattr(op, "ID", "")
+    opid = getattr(op, "ID", "") or ""
 
     kwargs = {}
     if "flat_sbox_mode" in supported:
@@ -274,8 +279,8 @@ def _call_gen_autoguess(
         target_nonrename = nonrename_perm if _is_permutation_equal(opid) else False
         which_flag = "perm_rename=False"
     else:
-        target_nonrename = nonrename_perm
-        which_flag = "perm_rename=False"
+        target_nonrename = False
+        which_flag = ""
 
     if target_nonrename and "treat_as_nonrename" not in supported:
         raise ValueError(
@@ -498,7 +503,7 @@ def emit_function(
 
             for op in ops:
                 clsname = op.__class__.__name__
-                opid = getattr(op, "ID", "")
+                opid = getattr(op, "ID", "") or ""
 
                 # Skip by class name
                 if clsname in skip_op_set:
@@ -532,7 +537,10 @@ def emit_function(
 
                 # Must have the method
                 if not hasattr(op, "gen_autoguess_constr"):
-                    continue
+                    raise NotImplementedError(
+                        f"AutoGuess does not support {clsname} {opid!r} at round={r}, layer={l}; "
+                        f"implement gen_autoguess_constr or explicitly skip it with skip_ops/skip_layers"
+                    )
 
                 # Determine algebraic mode
                 want_alg = _matches_filter(clsname, opid, alg_filter)
@@ -628,5 +636,24 @@ def emit_cipher(
     finally:
         if per_func_skip:
             kwargs["skip_rounds"] = global_skip_rounds
+
+    # Primitive boundary links live outside .functions. Include links to
+    # endpoints in the emitted model, allowing callers to use public
+    # plaintext/key/ciphertext IDs without reviving skipped rounds/functions.
+    active_ids = {token for line in all_relations for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", line)}
+    for op in list(getattr(cipher, "inputs_constraints", [])) + list(getattr(cipher, "outputs_constraints", [])):
+        endpoints = [v.ID for v in op.input_vars + op.output_vars]
+        if not any(var in active_ids for var in endpoints):
+            continue
+        if not hasattr(op, "gen_autoguess_constr"):
+            raise NotImplementedError(f"AutoGuess does not support primitive boundary operator {op!r}")
+        all_relations.extend(_call_gen_autoguess(
+            op,
+            algebraic=False,
+            sbox_form=kwargs.get("sbox_form"),
+            nonrename_perm=kwargs.get("nonrename_perm", False),
+            nonrename_rot=kwargs.get("nonrename_rot", False),
+            nonrename_gf2=kwargs.get("nonrename_gf2", False),
+        ))
 
     return all_relations

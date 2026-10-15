@@ -22,6 +22,7 @@ In case you use this tool please include the above copyright informations (name,
 
 import os
 import time
+from math import ceil
 from pysat import solvers
 from pysat import formula
 import random
@@ -32,6 +33,7 @@ from core.parsesolution import parse_solver_solution
 from core.graphdrawer import draw_graph
 from config import TEMP_DIR
 from core.varnames import step_var, path_var
+from core.solverresult import solve_sat
 
 
 class ReduceGDtoZ3SMT:
@@ -56,7 +58,7 @@ class ReduceGDtoZ3SMT:
         outputfile_name="output",
         max_guess=0,
         max_steps=0,
-        sat_solver="cadical",
+        sat_solver="cadical153",
         tikz=0,
         preprocess=1,
         D=2,
@@ -71,19 +73,9 @@ class ReduceGDtoZ3SMT:
         self.max_guess = max_guess
         self.max_steps = max_steps
         self.sat_solver_name = sat_solver
-        self.supported_sat_solvers = (
-            list(solvers.SolverNames.cadical)
-            + list(solvers.SolverNames.glucose4)
-            + list(solvers.SolverNames.glucose3)
-            + list(solvers.SolverNames.lingeling)
-            + list(solvers.SolverNames.maplesat)
-            + list(solvers.SolverNames.maplechrono)
-            + list(solvers.SolverNames.maplecm)
-            + list(solvers.SolverNames.minicard)
-            + list(solvers.SolverNames.minisat22)
-            + list(solvers.SolverNames.minisatgh)
-        )
-        assert sat_solver in self.supported_sat_solvers
+        self.supported_sat_solvers = [name for name in vars(solvers.SolverNames) if not name.startswith("_")]
+        if self.sat_solver_name not in self.supported_sat_solvers:
+            raise ValueError("Unsupported SAT solver: %s" % self.sat_solver_name)
         self.dglayout = dglayout
         self.draw_graph = drawgraph
         self.log = log
@@ -100,6 +92,7 @@ class ReduceGDtoZ3SMT:
         self.variables = parsed_data["variables"]
         self.known_variables = parsed_data["known_variables"]
         self.target_variables = parsed_data["target_variables"]
+        self.target_weights = parsed_data["target_weights"]
         self.notguessed_variables = parsed_data["notguessed_variables"]
         self.symmetric_relations = parsed_data["symmetric_relations"]
         self.implication_relations = parsed_data["implication_relations"]
@@ -166,12 +159,9 @@ class ReduceGDtoZ3SMT:
         # self.solver.add(z3.Sum([z3.If(initial_state_vars[i], 1, 0)
         #                     for i in range(len(initial_state_vars))]) <= self.max_guess)
         _known_set = set(self.known_variables)
-        initial_state_vars = list(
-            map(
-                lambda x: (z3.Bool(x), 1),
-                [step_var(v, 0) for v in self.variables if v not in _known_set],
-            )
-        )
+        weights = self.target_weights or {}
+        initial_state_vars = [(z3.Bool(step_var(v, 0)), weights.get(v, 1))
+                              for v in self.variables if v not in _known_set]
         if initial_state_vars != []:
             self.solver.add(
                 z3.PbLe(
@@ -309,62 +299,35 @@ class ReduceGDtoZ3SMT:
         solve the derived CNF formula
         """
 
+        self.optimal = False
+        self.timed_out = False
+        self.termination_reason = "unknown"
         self.convert_smt_to_cnf()
         cnf_formula = formula.CNF(self.cnf_file_path)
-        if self.sat_solver_name in solvers.SolverNames.cadical:
-            sat_solver = solvers.Cadical()
-        elif self.sat_solver_name in solvers.SolverNames.glucose4:
-            sat_solver = solvers.Glucose4()
-        elif self.sat_solver_name in solvers.SolverNames.glucose3:
-            sat_solver = solvers.Glucose3()
-        elif self.sat_solver_name in solvers.SolverNames.lingeling:
-            sat_solver = solvers.Lingeling()
-        elif self.sat_solver_name in solvers.SolverNames.maplesat:
-            sat_solver = solvers.Maplesat()
-        elif self.sat_solver_name in solvers.SolverNames.maplechrono:
-            sat_solver = solvers.MapleChrono()
-        elif self.sat_solver_name in solvers.SolverNames.maplecm:
-            sat_solver = solvers.MapleCM()
-        elif self.sat_solver_name in solvers.SolverNames.minicard:
-            sat_solver = solvers.Minicard()
-        elif self.sat_solver_name in solvers.SolverNames.minisat22:
-            sat_solver = solvers.Minisat22()
-        elif self.sat_solver_name in solvers.SolverNames.minisatgh:
-            sat_solver = solvers.MinisatGH()
-        else:
-            print(
-                "Choose a solver from the following list please:%s"
-                % ", ".join(self.supported_sat_solvers)
-            )
-            return
+        sat_solver = solvers.Solver(name=self.sat_solver_name)
         sat_solver.append_formula(cnf_formula)
         print("\nSolving via a SAT solver ...")
         start_time = time.time()
-        # Regarding time_limit: Note that only MiniSat-like solvers support this functionality (e.g. Cadical and Lingeling do not
-        # support it).
-        if self.time_limit != -1:
-            if self.sat_solver_name in list(solvers.SolverNames.cadical) + list(
-                solvers.SolverNames.lingeling
-            ):
-                print("time_limit is not supported for the chosen sat solver ... ")
-                result = sat_solver.solve()
-            else:
-                timer = Timer(self.time_limit, self.interrupt, [sat_solver])
-                timer.start()
-                result = sat_solver.solve_limited(expect_interrupt=True)
-        else:
-            result = sat_solver.solve()
+        try:
+            result = solve_sat(sat_solver, self.sat_solver_name, self.time_limit)
+            self.satsolver_solution = sat_solver.get_model() if result is True else None
+        except KeyboardInterrupt:
+            self.termination_reason = "interrupted"
+            result = None
+        finally:
+            sat_solver.delete()
         elapsed_time = time.time() - start_time
         print("Time used by SAT solver: %0.2f seconds" % elapsed_time)
         if result == True:
-            self.satsolver_solution = sat_solver.get_model()
+            self.termination_reason = "solution_found"
+            positive = set(v for v in self.satsolver_solution if v > 0)
             self.solutions = [0] * (self.max_steps + 1)
             for step in range(self.max_steps + 1):
                 state_vars = [step_var(v, step) for v in self.variables]
                 state_values = list(
                     map(
                         lambda x: int(
-                            self.satsolver_solution[self.dimacs_vars_dict[x] - 1] > 0
+                            self.dimacs_vars_dict[x] in positive
                         ),
                         [st_var for st_var in state_vars],
                     )
@@ -382,19 +345,30 @@ class ReduceGDtoZ3SMT:
                     self.dglayout,
                 )
         elif result == False:
+            self.termination_reason = "infeasible"
             print("The problem is UNSAT!\n")
         else:
-            print(
-                "I need more time! The solver was interrupted before finding any solution!"
-            )
-        sat_solver.delete()
+            if self.termination_reason != "interrupted":
+                self.timed_out = self.time_limit != -1
+                self.termination_reason = "time_limit" if self.timed_out else "unknown"
+            print("The solver stopped before finding any solution (%s)." % self.termination_reason)
         if self.log == 0:
             os.remove(self.cnf_file_path)
+        return result
 
     def solve_via_smtsolver(self):
         """
         This method uses Z3 to solve the obtained SMT problem
         """
+        self.optimal = False
+        self.timed_out = False
+        self.termination_reason = "unknown"
+        if self.time_limit < 0 and self.time_limit != -1:
+            raise ValueError("Time limit must be nonnegative or -1")
+        if self.time_limit == 0:
+            self.timed_out = True
+            self.termination_reason = "time_limit"
+            return None
         # If you want to produce a new solution at each new run uncomment this line
         z3.set_param("smt.random_seed", int(time.time()))
         # If you want get the same solution as before, uncomment this line
@@ -406,12 +380,16 @@ class ReduceGDtoZ3SMT:
         print(
             "Checking the satisfiablity of the obtained SMT model using z3-solver ..."
         )
-        if self.time_limit != -1:
-            self.solver.set(timeout=self.time_limit * 1000)
+        timeout = 0 if self.time_limit == -1 else max(1, ceil(self.time_limit * 1000))
+        self.solver.set(timeout=timeout)
         start_time = time.time()
         ##########################
         ##########################
-        result = self.solver.check()
+        try:
+            result = self.solver.check()
+        except KeyboardInterrupt:
+            self.termination_reason = "interrupted"
+            return None
         ##########################
         ##########################
         elapsed_time = time.time() - start_time
@@ -420,6 +398,7 @@ class ReduceGDtoZ3SMT:
         solver_statistics = self.solver.statistics()
         # print(solver_statistics)
         if result == z3.sat:
+            self.termination_reason = "solution_found"
             # self.solution = self.solver.model()
             # Extract the solution
             self.solver_model = self.solver.model()
@@ -451,10 +430,16 @@ class ReduceGDtoZ3SMT:
                     self.dglayout,
                 )
         elif result == z3.unsat:
+            self.termination_reason = "infeasible"
             print(
                 "The model is UNSAT!\nIncrease the max_guess, and max_steps paramters, and try again."
             )
         elif result == z3.unknown:
-            print(
-                "Solver could not find the solution\nI need more time! The solving process was interrupted before finding any solution."
-            )
+            reason = self.solver.reason_unknown().lower()
+            if "timeout" in reason:
+                self.timed_out = True
+                self.termination_reason = "time_limit"
+            elif "interrupt" in reason or "cancel" in reason:
+                self.termination_reason = "interrupted"
+            print("The solver stopped before finding any solution (%s)." % self.termination_reason)
+        return True if result == z3.sat else False if result == z3.unsat else None

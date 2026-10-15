@@ -54,6 +54,7 @@ from pysmt.shortcuts import (
     write_smtlib,
 )
 from math import ceil, log2
+from pysmt.exceptions import SolverReturnedUnknownResultError
 from core.inputparser import read_relation_file
 from core.parsesolution import parse_solver_solution
 from core.graphdrawer import draw_graph
@@ -130,6 +131,7 @@ class ReduceGDtoSMT:
         self.variables = parsed_data["variables"]
         self.known_variables = parsed_data["known_variables"]
         self.target_variables = parsed_data["target_variables"]
+        self.target_weights = parsed_data["target_weights"]
         self.notguessed_variables = parsed_data["notguessed_variables"]
         self.symmetric_relations = parsed_data["symmetric_relations"]
         self.implication_relations = parsed_data["implication_relations"]
@@ -139,9 +141,6 @@ class ReduceGDtoSMT:
         )
         self.num_of_vars = len(self.variables)
         ###############################
-        if self.max_guess > self.num_of_vars:
-            self.max_guess = self.num_of_vars
-            print("Number of guessed variables is at most: %d" % self.num_of_vars)
         self.deductions = self.generate_possible_deductions()
         self.variables_dictionary = dict()
         self.time_limit = -1
@@ -201,16 +200,24 @@ class ReduceGDtoSMT:
         """
 
         _known_set = set(self.known_variables)
+        self.update_variables_dictionary([step_var(v, 0) for v in self.variables])
+        self.update_variables_dictionary([step_var(v, self.max_steps) for v in self.target_variables])
         initial_state_vars = [
             step_var(v, 0) for v in self.variables if v not in _known_set
         ]
         if initial_state_vars != []:
             self.update_variables_dictionary(initial_state_vars)
-            bv_length = ceil(log2(len(initial_state_vars))) + 1
-            sum = BV(0, width=bv_length)
-            for iv in initial_state_vars:
-                sum = BVAdd(sum, BVZExt(self.variables_dictionary[iv], bv_length - 1))
-            clause = BVULE(sum, BV(self.max_guess, width=bv_length))
+            weights = self.target_weights or {}
+            unknown = [v for v in self.variables if v not in _known_set]
+            costs = [weights.get(v, 1) for v in unknown]
+            # Include the bound in the width, avoiding truncation even when a
+            # caller permits more guesses than the total possible cost.
+            bv_length = max(1, max(sum(costs), self.max_guess).bit_length())
+            guess_cost = BV(0, width=bv_length)
+            for iv, weight in zip(initial_state_vars, costs):
+                term = BVZExt(self.variables_dictionary[iv], bv_length - 1)
+                guess_cost = BVAdd(guess_cost, BVMul(BV(weight, width=bv_length), term))
+            clause = BVULE(guess_cost, BV(self.max_guess, width=bv_length))
             self.smt_solver.add_assertion(clause)
             # self.smt_formula = self.smt_formula.And(clause)
 
@@ -310,6 +317,26 @@ class ReduceGDtoSMT:
         This method the chosen SMT solver to solve the generated SMT problem
         """
 
+        self.optimal = False
+        self.timed_out = False
+        self.termination_reason = "unknown"
+        if self.time_limit < 0 and self.time_limit != -1:
+            raise ValueError("Time limit must be nonnegative or -1")
+        if self.time_limit == 0:
+            self.timed_out = True
+            self.termination_reason = "time_limit"
+            return None
+        if self.time_limit != -1 and self.smt_solver_name != "z3":
+            raise ValueError(
+                "PySMT solver %s cannot enforce time limits here; use smtsolver='z3' "
+                "or omit timelimit" % self.smt_solver_name
+            )
+        if self.smt_solver_name == "z3":
+            # PySMT's common API has no deadline parameter. Its Z3 backend
+            # exposes the native solver, which supports wall-clock milliseconds.
+            # Zero means unlimited to Z3, so positive fractions must round up.
+            timeout = 0 if self.time_limit == -1 else max(1, ceil(self.time_limit * 1000))
+            self.smt_solver.z3.set(timeout=timeout)
         # If you want to get the same solution in each single execution, chose a fixed value for the following parameter
         self.smt_solver.options.random_seed = random.randint(0, 1000)
         # self.smt_solver.options.random_seed = 1370
@@ -320,11 +347,20 @@ class ReduceGDtoSMT:
         start_time = time.time()
         ##########################
         ##########################
-        if self.time_limit != -1:
-            print("Time limit is not currently supported by PySMT.")
+        try:
             result = self.smt_solver.check_sat()
-        else:
-            result = self.smt_solver.check_sat()
+        except SolverReturnedUnknownResultError:
+            result = None
+            if self.smt_solver_name == "z3":
+                reason = self.smt_solver.z3.reason_unknown().lower()
+                if "timeout" in reason:
+                    self.timed_out = True
+                    self.termination_reason = "time_limit"
+                elif "interrupt" in reason or "cancel" in reason:
+                    self.termination_reason = "interrupted"
+        except KeyboardInterrupt:
+            self.termination_reason = "interrupted"
+            return None
         # temp = read_smtlib(self.smt_file_path)
         # result = is_sat(temp)
         ##########################
@@ -334,6 +370,7 @@ class ReduceGDtoSMT:
         # solver_info = self.smt_solver.get_info()
         # print(solver_statistics)
         if result == True:
+            self.termination_reason = "solution_found"
             # Extract the solution
             self.smt_solver_model = self.smt_solver.get_model()
             self.solutions = [0] * (self.max_steps + 1)
@@ -358,6 +395,7 @@ class ReduceGDtoSMT:
                 )
             return True
         elif result == False:
+            self.termination_reason = "infeasible"
             print("\n" + "=" * 60)
             print("RESULT: UNSATISFIABLE")
             print("The model is UNSAT!")
@@ -366,7 +404,7 @@ class ReduceGDtoSMT:
             return False
         else:
             print("\n" + "=" * 60)
-            print("RESULT: TIMEOUT")
-            print("The solver was interrupted before finding any solution.")
+            print("RESULT: %s" % self.termination_reason.upper())
+            print("The solver stopped before finding any solution.")
             print("=" * 60)
             return None

@@ -620,16 +620,30 @@ class Sbox(Operator):
             "backward_only": only output => input
             "adaptive":      forward if n_in <= n_out, backward if n_out <= n_in
 
-        NOTE: NONRENAME marker on flat-mode lines is critical — an S-box is a
-        non-linear bijection, NOT an equality. Without it the cleaner's
-        `_is_rename` would collapse input/output via union-find, effectively
-        replacing the S-box with the identity and linearising the cipher.
+        KNOWLEDGE_EQ marks mutual determination through a bijection. The
+        cleaner may merge knowledge states in connection-only models, but
+        preserves distinct values when actual algebraic equations are present.
         """
         in_ids = [v.ID for v in self.input_vars]
         out_ids = [v.ID for v in self.output_vars]
+        if (sum(v.bitsize for v in self.input_vars) != self.input_bitsize
+                or sum(v.bitsize for v in self.output_vars) != self.output_bitsize):
+            raise ValueError("S-box wiring width must match its lookup-table dimensions")
+        strategies = {"bidirectional", "forward_only", "backward_only", "adaptive"}
+        if non_square_strategy not in strategies:
+            raise ValueError(f"Unknown S-box determination strategy {non_square_strategy!r}")
+        if self.table is None or len(self.table) != 1 << self.input_bitsize:
+            raise ValueError("AutoGuess S-box emission requires its complete lookup table")
+        if any(not isinstance(value, int) or not 0 <= value < 1 << self.output_bitsize for value in self.table):
+            raise ValueError("S-box lookup values must fit the output width")
+        injective = len(set(self.table)) == len(self.table)
 
         if flat_sbox_mode:
-            return [f"{', '.join(in_ids)}, {', '.join(out_ids)}"]
+            if len(in_ids) != 1 or len(out_ids) != 1:
+                raise ValueError("S-box rename form requires one word input and one word output")
+            if not injective or self.input_bitsize != self.output_bitsize:
+                raise ValueError("S-box rename form requires a bijection; use implication form")
+            return [f"{in_ids[0]}, {out_ids[0]}, KNOWLEDGE_EQ"]
 
         n_in, n_out = len(in_ids), len(out_ids)
         do_forward = non_square_strategy in ("bidirectional", "forward_only")
@@ -637,6 +651,10 @@ class Sbox(Operator):
         if non_square_strategy == "adaptive":
             do_forward = n_in <= n_out
             do_backward = n_out <= n_in
+        if do_backward and not injective:
+            if non_square_strategy == "backward_only":
+                raise ValueError("A non-injective S-box cannot determine its input from its output")
+            do_backward = False
 
         rels = []
         ante = ", ".join(in_ids)

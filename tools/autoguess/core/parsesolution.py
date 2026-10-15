@@ -21,6 +21,7 @@ In case you use this tool please include the above copyright informations (name,
 """
 
 from core.varnames import step_var
+from core.solverresult import current_result, atomic_write
 
 
 def parse_solver_solution(gd):
@@ -35,6 +36,11 @@ def parse_solver_solution(gd):
         for v in gd.variables
         if (gd.solutions[0][step_var(v, 0)] == 1) and (v not in gd.known_variables)
     ]
+    # Check the reported basis independently of the backend's state assignment.
+    # A satisfiable encoding must imply actual finite-depth target coverage.
+    validated = current_result(gd, True)
+    if validated["status"] != "sat":
+        raise RuntimeError("Solver model does not determine targets: " + ", ".join(validated["missing_targets"]))
     numbers_of_guesses = sum(gd.solutions[0].values()) - len(gd.known_variables)
 
     if numbers_of_guesses != len(gd.guessed_vars):
@@ -56,6 +62,8 @@ def parse_solver_solution(gd):
     print("RESULTS")
     print("=" * 60)
     print(f"Number of guesses:         {numbers_of_guesses}")
+    if getattr(gd, "target_weights", None):
+        print(f"Total guess weight:        {validated['cost']}")
     print(f"Known in final state:      {gd.final_info} / {len(gd.variables)}")
     print(f"Max steps used:            {gd.max_steps}")
     print("-" * 60)
@@ -72,10 +80,11 @@ def parse_solver_solution(gd):
     output_buffer += "Number of known variables: %d\n" % len(gd.known_variables)
     output_buffer += "Number of guessed variables: %d\n" % len(gd.guessed_vars)
     output_buffer += "Number of state copies (max_steps): %d\n" % gd.max_steps
-    output_buffer += (
-        "An upper bound for the number of guessed variables given by user (max_guess): %d\n"
-        % gd.max_guess
-    )
+    if getattr(gd, "target_weights", None):
+        output_buffer += "Total guess weight: %d\n" % validated["cost"]
+        output_buffer += "An upper bound for guess weight (max_guess): %d\n" % gd.max_guess
+    else:
+        output_buffer += "An upper bound for the number of guessed variables given by user (max_guess): %d\n" % gd.max_guess
     output_buffer += (
         "%d out of %d state variables are known after %d state copies\n"
         % (gd.final_info, gd.num_of_vars, gd.max_steps)
@@ -224,5 +233,5 @@ def parse_solver_solution(gd):
             output_buffer += "  %s = %s\n" % (dummy_var, " * ".join(original_vars))
         output_buffer += "\n" + separator_line
 
-    with open(gd.output_dir, "w") as outputfile_obj:
-        outputfile_obj.write(output_buffer)
+    atomic_write(gd.output_dir, output_buffer)
+    gd._report_written = gd.output_dir

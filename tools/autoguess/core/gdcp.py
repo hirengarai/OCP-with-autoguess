@@ -64,7 +64,7 @@ class ReduceGDtoCP:
         D=2,
         dglayout="dot",
         drawgraph=True,
-        log="0",
+        log=0,
         threads=0,
         extra_known=None,
     ):
@@ -121,6 +121,7 @@ class ReduceGDtoCP:
         self.variables = parsed_data["variables"]
         self.known_variables = parsed_data["known_variables"]
         self.target_variables = parsed_data["target_variables"]
+        self.target_weights = parsed_data["target_weights"]
         self.notguessed_variables = parsed_data["notguessed_variables"]
         self.symmetric_relations = parsed_data["symmetric_relations"]
         self.implication_relations = parsed_data["implication_relations"]
@@ -131,12 +132,10 @@ class ReduceGDtoCP:
         self.num_of_vars = len(self.variables)
 
     def _set_max_guess(self):
-        if (self.max_guess is None) or (self.max_guess > len(self.target_variables)):
-            self.max_guess = (
-                len(self.target_variables)
-                if self.notguessed_variables is None
-                else len(self.variables)
-            )
+        if self.max_guess is None:
+            weights = self.target_weights or {}
+            self.max_guess = sum(weights.get(v, 1) for v in self.variables
+                                 if v not in self.known_variables)
             print(
                 "Number of guessed variables is set to be at most %d" % self.max_guess
             )
@@ -193,6 +192,9 @@ class ReduceGDtoCP:
         and limits the maximum number of guessed variables.
         It also limits the target variables to be known in the final step of knowledge propagation
         """
+        # At depth zero there are no propagation constraints to register these
+        # variables. Known inputs still need declarations and solution entries.
+        self.update_variables_list([step_var(v, 0) for v in self.variables])
         self._limit_max_guessed_variables()
         self._force_target_variables_known()
         self._set_known_variables()
@@ -204,9 +206,12 @@ class ReduceGDtoCP:
         ]
         if initial_state_vars:
             self.update_variables_list(initial_state_vars)
+            weights = self.target_weights or {}
+            weighted_terms = ["%d * %s" % (weights.get(v, 1), step_var(v, 0))
+                              for v in self.variables if v not in self.known_variables]
             self._constraint_lines.append(
                 "constraint %s <= %d;\n"
-                % (" + ".join(initial_state_vars), self.max_guess)
+                % (" + ".join(weighted_terms), self.max_guess)
             )
 
     def _force_target_variables_known(self):
@@ -235,9 +240,13 @@ class ReduceGDtoCP:
         initial_state_vars = [
             step_var(v, 0) for v in self.variables if v not in self.known_variables
         ]
-        if self.cp_optimization == 1 and initial_state_vars:
+        self._cp_has_objective = self.cp_optimization == 1 and bool(initial_state_vars)
+        if self._cp_has_objective:
+            weights = self.target_weights or {}
+            weighted_terms = ["%d * %s" % (weights.get(v, 1), step_var(v, 0))
+                              for v in self.variables if v not in self.known_variables]
             self._constraint_lines.append(
-                "solve minimize %s;\n" % " + ".join(initial_state_vars)
+                "solve minimize %s;\n" % " + ".join(weighted_terms)
             )
         else:
             self._constraint_lines.append("solve satisfy;\n")
@@ -312,9 +321,15 @@ class ReduceGDtoCP:
         """
         This method calls the chosen CP solver to solve the generated CP problem
         """
+        self.optimal = False
+        self.timed_out = False
+        self.termination_reason = "unknown"
+        self.lower_bound = None
         rand_int = random.randint(0, 1000) if "-r" in self.cp_solver.stdFlags else None
         time_limit = (
-            datetime.timedelta(seconds=self.time_limit)
+            # MiniZinc uses integer milliseconds and interprets zero as
+            # unlimited. Preserve every positive limit when it is converted.
+            datetime.timedelta(seconds=max(self.time_limit, 0.001))
             if self.time_limit != -1
             else None
         )
@@ -334,25 +349,64 @@ class ReduceGDtoCP:
                     MINIZINC_LIB_DIR + os.pathsep + _ld if _ld else MINIZINC_LIB_DIR
                 )
         try:
+            if self.time_limit < 0 and self.time_limit != -1:
+                raise ValueError("Time limit must be nonnegative or -1")
+            if self.time_limit == 0:
+                # Passing --time-limit 0 would start an unlimited search.
+                self.timed_out = True
+                self.termination_reason = "time_limit"
+                return None
             result = self.cp_inst.solve(
-                timeout=time_limit, processes=nthreads, random_seed=rand_int
+                time_limit=time_limit, processes=nthreads, random_seed=rand_int
             )
+        except KeyboardInterrupt:
+            self.termination_reason = "interrupted"
+            return None
         finally:
             # Restore original LD_LIBRARY_PATH
             if _old_ld is None:
                 os.environ.pop("LD_LIBRARY_PATH", None)
             else:
                 os.environ["LD_LIBRARY_PATH"] = _old_ld
+            if self.log == 0 and os.path.exists(self.cp_file_path):
+                os.remove(self.cp_file_path)
         elapsed_time = time.time() - start_time
         print("Solving finished in %0.2f seconds" % elapsed_time)
         return self._handle_solver_result(result)
 
     def _handle_solver_result(self, result):
+        has_objective = getattr(self, "_cp_has_objective", self.cp_optimization == 1)
+        self.optimal = bool(self.cp_optimization == 1 and (
+            result.status == minizinc.Status.OPTIMAL_SOLUTION
+            or (not has_objective and result.status in (
+                minizinc.Status.SATISFIED, minizinc.Status.ALL_SOLUTIONS,
+            ))
+        ))
+        self.timed_out = False
+        self.termination_reason = "unknown"
+        if self.optimal:
+            self.termination_reason = "optimal"
+        elif result.status == minizinc.Status.UNSATISFIABLE:
+            self.termination_reason = "infeasible"
+        elif self.time_limit != -1 and (
+            result.status == minizinc.Status.UNKNOWN
+            or (has_objective and result.status == minizinc.Status.SATISFIED)
+        ):
+            # MiniZinc preserves the final incumbent as SATISFIED when its
+            # optimization search reaches the time limit before proving it.
+            self.timed_out = True
+            self.termination_reason = "time_limit"
+        elif result.status in (
+            minizinc.Status.OPTIMAL_SOLUTION,
+            minizinc.Status.SATISFIED,
+            minizinc.Status.ALL_SOLUTIONS,
+        ):
+            self.termination_reason = "solution_found"
         if result.status in [
             minizinc.Status.OPTIMAL_SOLUTION,
             minizinc.Status.SATISFIED,
             minizinc.Status.ALL_SOLUTIONS,
-        ]:
+        ] or (result.status == minizinc.Status.UNKNOWN and result.solution not in (None, [])):
             self._extract_solution(result)
             parse_solver_solution(self)
             if self.draw_graph:
@@ -380,9 +434,8 @@ class ReduceGDtoCP:
             print("=" * 60)
         else:
             print("\n" + "=" * 60)
-            print("RESULT: TIMEOUT")
-            print("The solver was interrupted before finding any solution.")
-            print("Perhaps more time is needed!")
+            print("RESULT: %s" % self.termination_reason.upper())
+            print("The solver stopped before finding any solution.")
             print("=" * 60)
             return None
 
@@ -392,5 +445,3 @@ class ReduceGDtoCP:
             state_vars = [step_var(v, step) for v in self.variables]
             state_values = list(map(lambda vx: int(result.solution[vx]), state_vars))
             self.solutions[step] = dict(zip(state_vars, state_values))
-        if self.log == 0:
-            os.remove(self.cp_file_path)

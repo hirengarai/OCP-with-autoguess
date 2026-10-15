@@ -220,7 +220,15 @@ def parse_input(lines: List[str]) -> ParsedInput:
     same: List[Tuple[str, str]] = []
     cross: List[Tuple[str, str]] = []
     non_rename: List[str] = []
+    # Bijections equate *knowledge*, not values. Such aliases are safe for
+    # propagation-only systems, but cannot be substituted into polynomials.
+    has_algebraic = bool(raw["algebraic"]) or any(_is_algebraic(line) for line in raw["connection"])
     for line in raw["connection"]:
+        if line.rstrip().endswith(", KNOWLEDGE_EQ"):
+            if has_algebraic:
+                non_rename.append(line)
+                continue
+            line = line.rsplit(",", 1)[0].strip()
         if _is_rename(line):
             tokens = [t.strip() for t in line.split(",") if t.strip()]
             if len(tokens) == 2:
@@ -642,11 +650,12 @@ def collapse_cross_round(
 
 
 def _remove_trivial(lines: List[str]) -> List[str]:
-    """Remove relations like 'x, x' (but keep implications and algebraic).
+    """Simplify connection rules without strengthening their deductions.
 
-    Also rewrites lines whose tokens contain duplicates (e.g. ``a, a, b``
-    after substitution) into their deduplicated form (``a, b``). Without
-    this rewrite, the duplicate-token form survived to AutoGuess.
+    A symmetric line represents one rule per *position*. When aliases create
+    repeated tokens, quotient each directional rule separately. For example,
+    ``x,x,z`` permits ``x=>z``; it does not permit ``z=>x`` as ``x,z`` would.
+    Singleton lines are meaningful: they determine a constant without inputs.
     """
     result = []
     for line in lines:
@@ -654,18 +663,24 @@ def _remove_trivial(lines: List[str]) -> List[str]:
             result.append(line)
             continue
         tokens = [t.strip() for t in line.split(",") if t.strip()]
-        seen: Set[str] = set()
-        uniq: List[str] = []
-        for t in tokens:
-            if t not in seen:
-                seen.add(t)
-                uniq.append(t)
-        if len(uniq) >= 2:
-            result.append(", ".join(uniq) if len(uniq) != len(tokens) else line)
+        tokens = [t for t in tokens if t not in ("NONRENAME", "KNOWLEDGE_EQ")]
+        if len(set(tokens)) == len(tokens):
+            if tokens:
+                result.append(line)
+            continue
+        emitted: Set[str] = set()
+        for idx, target in enumerate(tokens):
+            premises = list(dict.fromkeys(tokens[:idx] + tokens[idx + 1:]))
+            if target in premises:
+                continue  # tautology; knowing target cannot teach us target
+            rule = f"{', '.join(premises)} => {target}" if premises else target
+            if rule not in emitted:
+                emitted.add(rule)
+                result.append(rule)
     return result
 
 
-_NONRENAME_MARKER_RE = re.compile(r"\s*,\s*NONRENAME\s*$")
+_NONRENAME_MARKER_RE = re.compile(r"\s*,\s*(?:NONRENAME|KNOWLEDGE_EQ)\s*$")
 
 
 def _strip_nonrename_markers(lines: List[str]) -> List[str]:
@@ -842,6 +857,18 @@ def rewrite_and_format(
     full_preserved = list(preserved)
     if config.debug_cross_renames:
         full_preserved.extend(_debug_cross_rename_lines(parsed, same_sub, cross_sub))
+
+    # An identity-only component may disappear completely when its equality
+    # aliases are collapsed. Keep modeled roles in the variable universe via
+    # harmless self-implications so the solver can still enforce their roles.
+    original_vars = {v for pair in parsed.same_round_renames + parsed.cross_round_renames for v in pair}
+    original_vars.update(m.group(0) for line in parsed.non_rename_relations for m in _VAR_RE.finditer(line))
+    surviving_vars = {m.group(0) for line in non_rename + full_preserved for m in _VAR_RE.finditer(line)}
+    for original in parsed.known + parsed.target + parsed.not_guessed:
+        canonical = substitution.resolve(original)
+        if original in original_vars and canonical not in surviving_vars:
+            non_rename.append(f"{canonical} => {canonical}")
+            surviving_vars.add(canonical)
 
     output = _format_output(non_rename, full_preserved, known, target, not_guessed)
 

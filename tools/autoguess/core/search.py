@@ -20,10 +20,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 In case you use this tool please include the above copyright informations (name, contact, license)
 """
 
-from logging import log
-import sys
-import io
 import time
+
+from core.solverresult import (
+    current_result, basis_result, solve_sat, remaining_time, timed_search,
+    termination_result, get_time_limit,
+)
 
 
 def _parse_extra_known(parameters):
@@ -45,481 +47,258 @@ def _parse_extra_known(parameters):
     return result or None
 
 
-def _findmin_descent(parameters, solver_type):
-    """
-    Shared helper for --findmin: iteratively decrease max_guess from the
-    user-supplied bound until the model becomes UNSAT, then re-solve at
-    the optimal value with full output.
-
-    SAT uses incremental solving (ITotalizer + assumption-based bounds)
-    so the solver is created once and learned clauses are reused across
-    iterations.  SMT falls back to per-iteration construction.
-    """
-    if solver_type == "sat":
-        from core.gdsat import ReduceGDtoSAT as SolverClass
-    else:
-        from core.gdsmt import ReduceGDtoSMT as SolverClass
-
-    def _build_and_solve(mg, quiet=False):
-        """Create solver, build model, solve.  Returns (result, solver_instance)."""
-        _ek = _parse_extra_known(parameters)
-        if solver_type == "sat":
-            solver = SolverClass(
-                inputfile_name=parameters["inputfile"],
-                outputfile_name=parameters["outputfile"],
-                max_guess=mg,
-                max_steps=parameters["maxsteps"],
-                sat_solver=parameters["satsolver"],
-                tikz=parameters["tikz"],
-                preprocess=parameters["preprocess"],
-                D=parameters["D"],
-                dglayout=parameters["dglayout"],
-                drawgraph=parameters.get("drawgraph", True),
-                log=parameters["log"],
-                extra_known=_ek,
-            )
-        else:
-            solver = SolverClass(
-                inputfile_name=parameters["inputfile"],
-                outputfile_name=parameters["outputfile"],
-                max_guess=mg,
-                max_steps=parameters["maxsteps"],
-                smt_solver_name=parameters["smtsolver"],
-                tikz=parameters["tikz"],
-                preprocess=parameters["preprocess"],
-                D=parameters["D"],
-                dglayout=parameters["dglayout"],
-                drawgraph=parameters.get("drawgraph", True),
-                log=parameters["log"],
-                extra_known=_ek,
-            )
-        if quiet:
-            old_stdout = sys.stdout
-            sys.stdout = io.StringIO()
-        try:
-            solver.make_model()
-            solver.time_limit = parameters["timelimit"]
-            if solver_type == "sat":
-                result = solver.solve_via_satsolver()
-            else:
-                result = solver.solve_via_smtsolver()
-        finally:
-            if quiet:
-                sys.stdout = old_stdout
-        return result, solver
-
-    current_mg = parameters["maxguess"]
-    print("=" * 60)
-    print(f"FIND-MIN MODE: searching for minimum guesses (starting from {current_mg})")
-    print("=" * 60)
-
-    total_start = time.time()
-    _w = len(str(current_mg))  # width for aligned number columns
-
-    if solver_type == "sat":
-        optimal = _findmin_sat_incremental(parameters, current_mg, _w)
-    else:
-        # SMT: per-iteration construction (no incremental support yet)
-        optimal = None
-        while current_mg >= 0:
-            iter_start = time.time()
-            result, solver = _build_and_solve(current_mg, quiet=True)
-            iter_elapsed = time.time() - iter_start
-            if result is True:
-                n_guessed = len(solver.guessed_vars)
-                print(
-                    f"  max_guess = {current_mg:{_w}d}:  SAT  — a guess basis of size {n_guessed:{_w}d} exists  ({iter_elapsed:.2f}s)"
-                )
-                optimal = n_guessed
-                if n_guessed < current_mg:
-                    current_mg = n_guessed
-                else:
-                    current_mg -= 1
-            elif result is False:
-                print(
-                    f"  max_guess = {current_mg:{_w}d}:  UNSAT  ({iter_elapsed:.2f}s)"
-                )
-                break
-            else:
-                print(
-                    f"  max_guess = {current_mg:{_w}d}:  TIMEOUT  ({iter_elapsed:.2f}s)"
-                )
-                break
-
-    total_elapsed = time.time() - total_start
-
-    if optimal is None:
-        print("\n" + "#" * 60)
-        print("FIND-MIN RESULT: no feasible solution found")
-        print(f"Total findmin time: {total_elapsed:.2f}s")
-        print("Increase max_guess or max_steps and try again.")
-        print("#" * 60)
-        return
-
-    if optimal == 0:
-        print("\n" + "#" * 60)
-        print("FIND-MIN RESULT: minimum number of guesses = 0")
-        print(f"Total findmin time: {total_elapsed:.2f}s")
-        print("#" * 60)
-        return
-
-    # Re-solve at optimal with full output
-    print("\n" + "#" * 60)
-    print(f"FIND-MIN RESULT: minimum number of guesses = {optimal}")
-    print(f"Total findmin time: {total_elapsed:.2f}s")
-    print("#" * 60)
-    print(f"\nRe-solving with max_guess = {optimal} for detailed output ...\n")
-    print("(Note: the timings below are for this single verification")
-    print(" solve only, not for the entire findmin search.)\n")
-    _build_and_solve(optimal, quiet=False)
-    print(f"\nTotal findmin search time: {total_elapsed:.2f}s")
+def _common(parameters):
+    return dict(
+        inputfile_name=parameters["inputfile"], outputfile_name=parameters["outputfile"],
+        max_guess=parameters["maxguess"], max_steps=parameters["maxsteps"],
+        tikz=parameters.get("tikz", 0), preprocess=parameters.get("preprocess", 0),
+        D=parameters.get("D", 2), dglayout=parameters.get("dglayout", "dot"),
+        drawgraph=parameters.get("drawgraph", True), log=parameters.get("log", 0),
+        extra_known=_parse_extra_known(parameters),
+    )
 
 
-def _findmin_sat_incremental(parameters, start_mg, _w):
-    """
-    Incremental SAT-based findmin.
-
-    For unweighted problems: uses PySAT's ITotalizer with assumption-based
-    bounds.  The SAT solver is created once; structural constraints and
-    totalizer encoding are added once.  Each iteration only changes the
-    assumption literal, so the solver reuses all previously learned clauses.
-
-    For weighted problems: the input is parsed once and structural
-    constraints are generated once, but the PB cardinality constraint
-    is rebuilt per iteration (still saves parsing + constraint generation).
-    """
+def _sat_solver(parameters):
     from core.gdsat import ReduceGDtoSAT
-    from pysat import solvers as pysat_solvers
+    backend = parameters.get("satsolver") or (
+        "glucose3" if get_time_limit(parameters) != -1 else "cadical153"
+    )
+    return ReduceGDtoSAT(**_common(parameters), sat_solver=backend)
+
+
+def _extract_sat_model(solver, model):
+    from core.varnames import step_var
+    positive = set(literal for literal in model if literal > 0)
+    solver.solutions = [
+        {step_var(v, step): int(solver.variables_dictionary[step_var(v, step)] in positive)
+         for v in solver.variables}
+        for step in range(solver.max_steps + 1)
+    ]
+
+
+def _save_sat_solution(solver, model):
+    from core.parsesolution import parse_solver_solution
+    from core.graphdrawer import draw_graph
+    _extract_sat_model(solver, model)
+    parse_solver_solution(solver)
+    if solver.draw_graph:
+        draw_graph(solver.vertices, solver.edges, solver.known_variables, solver.guessed_vars,
+                   solver.output_dir, solver.tikz, solver.dglayout)
+
+
+def _findmin_sat_incremental(parameters, start_mg, _w=None):
+    """Minimize count or weight, preserving the best model and proof status.
+
+    The time limit covers the complete descent. A timeout after a feasible
+    solution returns that solution with optimal=False, never a false optimum.
+    """
+    from pysat import solvers, pb
     from pysat.card import ITotalizer
-    from pysat import pb
 
-    # Create solver object ONCE (parses input, generates deductions) — quietly
-    old_stdout = sys.stdout
-    sys.stdout = io.StringIO()
+    started = time.monotonic()
+    solver = _sat_solver(parameters)
+    solver.generate_sat_constraints()
+    solver.generate_boundary_no_cardinality()
+    literals, weights = solver.get_cardinality_lits()
+    sat = solvers.Solver(name=solver.sat_solver_name)
+    totalizer = None
+    best_model = None
+    best_cost = None
+    proven = False
+    last_status = None
+    bound = start_mg
+    top_id = solver.top_variable_identifier_so_far
+    stop_reason = "unknown"
     try:
-        solver_obj = ReduceGDtoSAT(
-            inputfile_name=parameters["inputfile"],
-            outputfile_name=parameters["outputfile"],
-            max_guess=start_mg,
-            max_steps=parameters["maxsteps"],
-            sat_solver=parameters["satsolver"],
-            tikz=parameters["tikz"],
-            preprocess=parameters["preprocess"],
-            D=parameters["D"],
-            dglayout=parameters["dglayout"],
-            drawgraph=False,
-            log=0,
-            extra_known=_parse_extra_known(parameters),
-        )
-        solver_obj.generate_sat_constraints()
-        solver_obj.generate_boundary_no_cardinality()
+        sat.append_formula(solver.cnf_formula)
+        if weights is None and literals:
+            totalizer = ITotalizer(lits=literals, ubound=min(bound + 1, len(literals)), top_id=top_id)
+            sat.append_formula(totalizer.cnf.clauses)
+        while bound >= 0:
+            assumptions = []
+            if totalizer is not None and bound < len(totalizer.rhs):
+                assumptions = [-totalizer.rhs[bound]]
+            elif weights is not None and literals:
+                encoding = pb.PBEnc.leq(lits=literals, weights=weights, bound=bound,
+                                        top_id=top_id, encoding=pb.EncType.binmerge)
+                sat.append_formula(encoding.clauses)
+                top_id = max(top_id, encoding.nv)
+            remaining = remaining_time(parameters)
+            try:
+                last_status = solve_sat(sat, solver.sat_solver_name, remaining, assumptions)
+            except KeyboardInterrupt:
+                last_status = None
+                stop_reason = "interrupted"
+                break
+            if last_status is not True:
+                proven = last_status is False and best_model is not None
+                stop_reason = ("optimal" if proven else "infeasible") if last_status is False else (
+                    "time_limit" if remaining != -1 else "unknown"
+                )
+                break
+            model = sat.get_model()
+            positive = set(literal for literal in model if literal > 0)
+            best_cost = sum(weight for literal, weight in zip(literals, weights or [1] * len(literals))
+                            if literal in positive)
+            best_model = model
+            print("  max_guess = %d: SAT (cost %d)" % (bound, best_cost))
+            if best_cost == 0:
+                proven = True
+                stop_reason = "optimal"
+                break
+            bound = best_cost - 1
     finally:
-        sys.stdout = old_stdout
-
-    lits, weights = solver_obj.get_cardinality_lits()
-    has_weights = weights is not None
-    n_lits = len(lits)
-    current_mg = start_mg
-    optimal = None
-
-    if not has_weights:
-        # ── Unweighted: ITotalizer + assumptions (fully incremental) ──
-        ubound = min(start_mg + 1, n_lits)
-        itot = ITotalizer(
-            lits=lits, ubound=ubound, top_id=solver_obj.top_variable_identifier_so_far
-        )
-
-        sat = pysat_solvers.Solver(name=parameters["satsolver"])
-        sat.append_formula(solver_obj.cnf_formula)
-        for cl in itot.cnf.clauses:
-            sat.add_clause(cl)
-
-        while current_mg >= 0:
-            # Enforce sum(lits) <= current_mg via assumption
-            if current_mg < len(itot.rhs):
-                assumptions = [-itot.rhs[current_mg]]
-            else:
-                assumptions = []
-
-            iter_start = time.time()
-            result = sat.solve(assumptions=assumptions)
-            iter_elapsed = time.time() - iter_start
-
-            if result:
-                model = sat.get_model()
-                n_guessed = sum(1 for l in lits if model[l - 1] > 0)
-                print(
-                    f"  max_guess = {current_mg:{_w}d}:  SAT  — a guess basis of size {n_guessed:{_w}d} exists  ({iter_elapsed:.2f}s)"
-                )
-                optimal = n_guessed
-                if n_guessed < current_mg:
-                    current_mg = n_guessed
-                else:
-                    current_mg -= 1
-            elif result is False:
-                print(
-                    f"  max_guess = {current_mg:{_w}d}:  UNSAT  ({iter_elapsed:.2f}s)"
-                )
-                break
-            else:
-                print(
-                    f"  max_guess = {current_mg:{_w}d}:  TIMEOUT  ({iter_elapsed:.2f}s)"
-                )
-                break
-
         sat.delete()
-        itot.delete()
-    else:
-        # ── Weighted: parse once, rebuild cardinality per iteration ──
-        base_clauses = list(solver_obj.cnf_formula.clauses)
-        top_id = solver_obj.top_variable_identifier_so_far
-
-        while current_mg >= 0:
-            card = pb.PBEnc.leq(
-                lits=lits,
-                weights=weights,
-                bound=current_mg,
-                top_id=top_id,
-                encoding=pb.EncType.binmerge,
-            )
-
-            sat = pysat_solvers.Solver(name=parameters["satsolver"])
-            for cl in base_clauses:
-                sat.add_clause(cl)
-            for cl in card.clauses:
-                sat.add_clause(cl)
-
-            iter_start = time.time()
-            result = sat.solve()
-            iter_elapsed = time.time() - iter_start
-
-            if result:
-                model = sat.get_model()
-                n_guessed = sum(1 for l in lits if model[l - 1] > 0)
-                weighted_cost = sum(
-                    w for l, w in zip(lits, weights) if model[l - 1] > 0
-                )
-                print(
-                    f"  max_guess = {current_mg:{_w}d}:  SAT  — size {n_guessed:{_w}d} (weight {weighted_cost}) exists  ({iter_elapsed:.2f}s)"
-                )
-                optimal = n_guessed
-                # Jump based on weighted cost (that is what the bound constrains)
-                if weighted_cost < current_mg:
-                    current_mg = weighted_cost
-                else:
-                    current_mg -= 1
-            elif result is False:
-                print(
-                    f"  max_guess = {current_mg:{_w}d}:  UNSAT  ({iter_elapsed:.2f}s)"
-                )
-                break
-            else:
-                print(
-                    f"  max_guess = {current_mg:{_w}d}:  TIMEOUT  ({iter_elapsed:.2f}s)"
-                )
-                break
-
-            sat.delete()
-
-    return optimal
+        if totalizer is not None:
+            totalizer.delete()
+    solver.termination_reason = stop_reason
+    if best_model is None:
+        return current_result(solver, last_status)
+    solver.max_guess = best_cost
+    _save_sat_solution(solver, best_model)
+    result = current_result(solver, True, optimal=proven)
+    result["optimization_time"] = time.monotonic() - started
+    print("FIND-MIN RESULT: %s cost = %d" % ("minimum" if proven else "best found", best_cost))
+    return result
 
 
-def search_using_cp(parameters):
-    """
-    Convert the guess-and-determine or key-bridging problem to a SMT problem,
-    and then solve it
-    """
-
-    from core.gdcp import ReduceGDtoCP
-
-    gdsmt = ReduceGDtoCP(
-        inputfile_name=parameters["inputfile"],
-        outputfile_name=parameters["outputfile"],
-        max_guess=parameters["maxguess"],
-        max_steps=parameters["maxsteps"],
-        cp_solver_name=parameters["cpsolver"],
-        cp_optimization=parameters["cpoptimization"],
-        tikz=parameters["tikz"],
-        preprocess=parameters["preprocess"],
-        D=parameters["D"],
-        dglayout=parameters["dglayout"],
-        drawgraph=parameters.get("drawgraph", True),
-        log=parameters["log"],
-        threads=parameters.get("threads", 0),
-        extra_known=_parse_extra_known(parameters),
-    )
-    gdsmt.make_model()
-    gdsmt.time_limit = parameters["timelimit"]
-    gdsmt.solve_via_cpsolver()
+def _findmin_descent(parameters, solver_type):
+    if solver_type == "sat":
+        return _findmin_sat_incremental(parameters, parameters["maxguess"])
+    bound = parameters["maxguess"]
+    best = None
+    while bound >= 0:
+        iteration = dict(parameters, maxguess=bound, findmin=False)
+        result = search_using_smt(iteration)
+        if result["status"] != "sat":
+            if best is not None:
+                best["optimal"] = result["status"] == "unsat"
+                return termination_result(best, result["termination_reason"])
+            return result
+        best = result
+        if result["cost"] == 0:
+            best["optimal"] = True
+            return termination_result(best)
+        bound = result["cost"] - 1
+    return best
 
 
-def search_using_milp(parameters):
-    """
-    Convert the guess-and-determine or key-bridging problem to an MILP problem,
-    and then solve it
-    """
-
-    from core.gdmilp import ReduceGDtoMILP
-
-    gdmilp = ReduceGDtoMILP(
-        inputfile_name=parameters["inputfile"],
-        outputfile_name=parameters["outputfile"],
-        max_guess=parameters["maxguess"],
-        max_steps=parameters["maxsteps"],
-        direction=parameters["milpdirection"],
-        tikz=parameters["tikz"],
-        preprocess=parameters["preprocess"],
-        D=parameters["D"],
-        dglayout=parameters["dglayout"],
-        drawgraph=parameters.get("drawgraph", True),
-        log=parameters["log"],
-        threads=parameters.get("threads", 0),
-        extra_known=_parse_extra_known(parameters),
-    )
-    gdmilp.make_model()
-    gdmilp.time_limit = parameters["timelimit"]
-    gdmilp.solve_model()
-
-
+@timed_search
 def search_using_sat(parameters):
-    """
-    Convert the guess-and-detrmine or key-bridging problem to a SAT problem,
-    and then solve it.  When findmin is enabled, iteratively decrease max_guess
-    until the model becomes UNSAT, returning the minimum number of guesses.
-    """
-    from core.gdsat import ReduceGDtoSAT
-
-    findmin = parameters.get("findmin", False)
-    if not findmin:
-        # Single-shot mode (original behaviour)
-        gdsat = ReduceGDtoSAT(
-            inputfile_name=parameters["inputfile"],
-            outputfile_name=parameters["outputfile"],
-            max_guess=parameters["maxguess"],
-            max_steps=parameters["maxsteps"],
-            sat_solver=parameters["satsolver"],
-            tikz=parameters["tikz"],
-            preprocess=parameters["preprocess"],
-            D=parameters["D"],
-            dglayout=parameters["dglayout"],
-            drawgraph=parameters.get("drawgraph", True),
-            log=parameters["log"],
-            extra_known=_parse_extra_known(parameters),
-        )
-        gdsat.make_model()
-        gdsat.time_limit = parameters["timelimit"]
-        gdsat.solve_via_satsolver()
-    else:
-        _findmin_descent(parameters, solver_type="sat")
+    if parameters.get("findmin", False):
+        return _findmin_descent(parameters, "sat")
+    solver = _sat_solver(parameters)
+    solver.make_model()
+    solver.time_limit = remaining_time(parameters)
+    return current_result(solver, solver.solve_via_satsolver())
 
 
+@timed_search
 def search_using_smt(parameters):
-    """
-    Convert the guess-and-determine or key-bridging problem to a SMT problem,
-    and then solve it.  When findmin is enabled, iteratively decrease max_guess
-    until the model becomes UNSAT, returning the minimum number of guesses.
-    """
-
     from core.gdsmt import ReduceGDtoSMT
+    if parameters.get("findmin", False):
+        return _findmin_descent(parameters, "smt")
+    solver = ReduceGDtoSMT(**_common(parameters), smt_solver_name=parameters.get("smtsolver", "z3"))
+    try:
+        solver.make_model()
+        solver.time_limit = remaining_time(parameters)
+        return current_result(solver, solver.solve_via_smtsolver())
+    finally:
+        solver.smt_solver.exit()
 
-    findmin = parameters.get("findmin", False)
-    if not findmin:
-        # Single-shot mode (original behaviour)
-        gdsmt = ReduceGDtoSMT(
-            inputfile_name=parameters["inputfile"],
-            outputfile_name=parameters["outputfile"],
-            max_guess=parameters["maxguess"],
-            max_steps=parameters["maxsteps"],
-            smt_solver_name=parameters["smtsolver"],
-            tikz=parameters["tikz"],
-            preprocess=parameters["preprocess"],
-            D=parameters["D"],
-            dglayout=parameters["dglayout"],
-            drawgraph=parameters.get("drawgraph", True),
-            log=parameters["log"],
-            extra_known=_parse_extra_known(parameters),
-        )
-        gdsmt.make_model()
-        gdsmt.time_limit = parameters["timelimit"]
-        gdsmt.solve_via_smtsolver()
-    else:
-        _findmin_descent(parameters, solver_type="smt")
+
+@timed_search
+def search_using_cp(parameters):
+    from core.gdcp import ReduceGDtoCP
+    solver = ReduceGDtoCP(**_common(parameters), cp_solver_name=parameters.get("cpsolver", "cp-sat"),
+                         cp_optimization=parameters.get("cpoptimization", 0), threads=parameters.get("threads", 0))
+    solver.make_model()
+    solver.time_limit = remaining_time(parameters)
+    outcome = solver.solve_via_cpsolver()
+    return current_result(solver, outcome, optimal=getattr(solver, "optimal", False))
+
+
+@timed_search
+def search_using_milp(parameters):
+    from core.gdmilp import ReduceGDtoMILP
+    solver = ReduceGDtoMILP(**_common(parameters), direction=parameters.get("milpdirection", "min"),
+                           threads=parameters.get("threads", 0))
+    try:
+        solver.make_model()
+        solver.time_limit = remaining_time(parameters)
+        outcome = solver.solve_model()
+        return current_result(solver, outcome, optimal=getattr(solver, "optimal", False))
+    finally:
+        if hasattr(solver, "milp_model"):
+            solver.milp_model.dispose()
 
 
 def search_using_groebnerbasis(parameters):
-    """Groebner basis solver is not available in the no-Sage variant.
-
-    The dispatcher in autoguess.py already rejects --solver groebner before
-    reaching here; this stub guards direct callers and keeps the signature
-    consistent with the other search_using_* functions.
-    """
-    del parameters
-    raise RuntimeError(
-        "Groebner solver is not supported in this version (requires SageMath). "
-        "Please use the original autoguess: https://github.com/hadipourh/autoguess"
-    )
+    raise RuntimeError("Groebner solver requires SageMath; use the original AutoGuess or another backend")
 
 
-def search_using_mark(parameters):
-    from core.gdmark import Mark
-
-    gdmark = Mark(
-        inputfile_name=parameters["inputfile"],
-        outputfile_name=parameters["outputfile"],
-        tikz=parameters["tikz"],
-        preprocess=parameters["preprocess"],
-        D=parameters["D"],
-        extra_known=_parse_extra_known(parameters),
-    )
-    gdmark.generate_and_triangulate_dependency_matrix()
-    gdmark.find_minimal_guess_basis()
-
-
-def search_using_elim(parameters):
-    from core.gdelim import Elim
-
-    gdmark = Elim(
-        inputfile_name=parameters["inputfile"],
-        outputfile_name=parameters["outputfile"],
-        tikz=parameters["tikz"],
-        preprocess=parameters["preprocess"],
-        D=parameters["D"],
-        extra_known=_parse_extra_known(parameters),
-    )
-    gdmark.remove_the_known_variables()
-    gdmark.find_minimal_guess_basis()
-
-
-def search_using_propagate(parameters):
-    """
-    Propagate knowledge through a system of connection relations
-    starting from a given set of initially known variables.
-
-    When --reducebasis is set, tries to shrink the basis given via -kn
-    by testing subsets of decreasing size.
-    """
-    from core.inputparser import read_relation_file
-
-    extra_known = _parse_extra_known(parameters)
-    parsed_data = read_relation_file(
-        parameters["inputfile"],
-        preprocess=parameters.get("preprocess", 0),
-        D=parameters.get("D", 2),
-        log=parameters.get("log", 0),
-        extra_known=extra_known,
-    )
-
-    if parameters.get("reducebasis", False):
-        from core.propagate import reduce_basis
-
-        if not extra_known:
-            print(
-                "Error: --reducebasis requires -kn with the initial guess basis to reduce."
-            )
-            return
-        reduce_basis(parsed_data=parsed_data, basis_variables=extra_known)
+def _heuristic_search(parameters, name):
+    if get_time_limit(parameters) != -1:
+        raise ValueError("%s cannot enforce time limits; use SAT, CP, MILP or SMT/Z3" % name)
+    import copy
+    if name == "mark":
+        from core.gdmark import Mark as Solver
     else:
-        from core.propagate import propagate_knowledge
+        from core.gdelim import Elim as Solver
+    solver = Solver(inputfile_name=parameters["inputfile"], outputfile_name=parameters["outputfile"],
+                    tikz=parameters.get("tikz", 0), preprocess=parameters.get("preprocess", 0),
+                    D=parameters.get("D", 2), log=parameters.get("log", 0),
+                    extra_known=_parse_extra_known(parameters))
+    data = copy.deepcopy(solver.__dict__)
+    solver.find_minimal_guess_basis()
+    guesses = [v for v in solver.guess_basis if v not in data["known_variables"]]
+    # Heuristics do not implement forbidden guesses or a hard budget. Validate
+    # the returned candidate, and do not mistake failure for an UNSAT proof.
+    weights = data.get("target_weights") or {}
+    cost = sum(weights.get(v, 1) for v in guesses)
+    if (set(guesses) & set(data["notguessed_variables"]) or
+            cost > parameters["maxguess"]):
+        return current_result(solver, None)
+    return basis_result(data, guesses, max_steps=parameters["maxsteps"])
 
-        known_variables = list(parsed_data.get("known_variables", []))
-        propagate_knowledge(parsed_data=parsed_data, known_variables=known_variables)
+
+@timed_search
+def search_using_mark(parameters):
+    return _heuristic_search(parameters, "mark")
+
+
+@timed_search
+def search_using_elim(parameters):
+    return _heuristic_search(parameters, "elim")
+
+
+@timed_search
+def search_using_propagate(parameters):
+    if get_time_limit(parameters) != -1:
+        raise ValueError("Propagation and basis reduction cannot enforce time limits; omit timelimit")
+    from core.inputparser import read_relation_file
+    from core.propagate import reduce_basis
+    extra_known = _parse_extra_known(parameters)
+    # Keep fixed file-known variables distinct from the guess basis.
+    data = read_relation_file(parameters["inputfile"], preprocess=parameters.get("preprocess", 0),
+                              D=parameters.get("D", 2), log=parameters.get("log", 0),
+                              extra_known=None if parameters.get("reducebasis", False) else extra_known)
+    if parameters.get("reducebasis", False):
+        if extra_known is None:
+            raise ValueError("--reducebasis requires --known with the initial guess basis")
+        reduced = reduce_basis(data, extra_known, max_steps=parameters.get("maxsteps"))
+        if reduced is None:
+            result = basis_result(data, [], max_steps=parameters.get("maxsteps"))
+            result["status"] = "unknown"
+            result["reduced_basis"] = None
+            return result
+        result = basis_result(data, reduced, max_steps=parameters.get("maxsteps"))
+        result["reduced_basis"] = reduced
+        result["optimal_subset"] = True
+        return result
+    return basis_result(data, [], max_steps=parameters.get("maxsteps"))
+
+
+@timed_search
+def search_using_reducebasis(parameters):
+    return search_using_propagate(dict(parameters, reducebasis=True))

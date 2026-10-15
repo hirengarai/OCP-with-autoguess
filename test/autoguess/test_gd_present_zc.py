@@ -60,11 +60,17 @@ def test_gd_present_zc():
             "name_prefix": cipher_name,
             "sbox_form": "implication",
             "algebraic_layers": ["PermutationLayer"],
-            "maxsteps": 10,
+            # Replaying the saved 60-guess basis needs 11 steps when
+            # algebraic models retain distinct values across bijections.
+            "maxsteps": 11,
         },
         config_solver={"preprocess": 1},
     )
 
+    assert result["status"] == "sat", result["status"]
+    assert result["targets_covered"]
+    assert len(result["guessed_variable_ids"]) <= 60
+    assert len(result["guessed_variables"]) == len(result["guessed_variable_ids"])
     print(f"[TEST] Guess basis ({len(result['guessed_variables'])}): "
           f"{[v.ID for v in result['guessed_variables']]}")
     return result

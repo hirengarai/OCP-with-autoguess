@@ -32,6 +32,7 @@ SOFTWARE.
 """
 
 from core import search
+from core.solverresult import timed_search
 from argparse import ArgumentParser, RawTextHelpFormatter
 import os
 import sys
@@ -42,7 +43,7 @@ def _resolve_dynamic_defaults(params):
     """
     If maxguess or maxsteps were not supplied by the user, derive sensible
     defaults from the input file:
-      maxguess  -> number of target variables
+      maxguess  -> total possible guess cost of unknown variables
       maxsteps  -> number of all variables (before preprocessing)
     A lightweight parse (preprocess=0) is used so this is fast.
     """
@@ -52,27 +53,33 @@ def _resolve_dynamic_defaults(params):
 
     parsed = read_relation_file(params["inputfile"], preprocess=0, D=2, log=0)
     if params["maxguess"] is None:
-        params["maxguess"] = len(parsed["target_variables"])
+        weights = parsed["target_weights"] or {}
+        params["maxguess"] = sum(weights.get(v, 1) for v in parsed["variables"]
+                                  if v not in parsed["known_variables"])
     if params["maxsteps"] is None:
         params["maxsteps"] = len(parsed["variables"])
 
 
+@timed_search
 def startsearch(tool_parameters):
     """
     Starts the search tool for the given parameters
     """
 
     _resolve_dynamic_defaults(tool_parameters)
+    for name in ("maxguess", "maxsteps"):
+        if not isinstance(tool_parameters[name], int) or tool_parameters[name] < 0:
+            raise ValueError("%s must be a nonnegative integer" % name)
 
     # Handle program flow
     if tool_parameters["solver"] == "milp":
-        search.search_using_milp(tool_parameters)
+        return search.search_using_milp(tool_parameters)
     elif tool_parameters["solver"] == "sat":
-        search.search_using_sat(tool_parameters)
+        return search.search_using_sat(tool_parameters)
     elif tool_parameters["solver"] == "smt":
-        search.search_using_smt(tool_parameters)
+        return search.search_using_smt(tool_parameters)
     elif tool_parameters["solver"] == "cp":
-        search.search_using_cp(tool_parameters)
+        return search.search_using_cp(tool_parameters)
     elif tool_parameters["solver"] == "groebner":
         print(
             "[ERROR] Groebner solver is not supported in this version (requires SageMath)."
@@ -85,11 +92,11 @@ def startsearch(tool_parameters):
         )
         sys.exit(1)
     elif tool_parameters["solver"] == "mark":
-        search.search_using_mark(tool_parameters)
+        return search.search_using_mark(tool_parameters)
     elif tool_parameters["solver"] == "elim":
-        search.search_using_elim(tool_parameters)
+        return search.search_using_elim(tool_parameters)
     elif tool_parameters["solver"] == "propagate":
-        search.search_using_propagate(tool_parameters)
+        return search.search_using_propagate(tool_parameters)
     else:
         print(
             "Choose the solver from the following options please: cp, milp, sat, smt, mark, elim, propagate"
@@ -217,7 +224,24 @@ def loadparameters(args):
     if params["reducebasis"]:
         params["_action"] = "reducebasis"
 
+    if not args.satsolver and params["solver"] == "sat" and params["timelimit"] != -1:
+        params["satsolver"] = "glucose3"
+
     return params
+
+
+def _print_result(result):
+    """Summarize the current run, including a best basis after timeout."""
+    print("STATUS: %s" % result["status"].upper())
+    print("Termination: %s" % result.get("termination_reason", "unknown"))
+    if result.get("timed_out"):
+        if result["status"] == "sat":
+            print("Time limit reached; returning the best validated basis found (optimal: false).")
+        else:
+            print("Time limit reached; no complete basis was found (status: unknown).")
+    print("Optimal: %s" % ("yes" if result.get("optimal") else "not established"))
+    if "elapsed_seconds" in result:
+        print("Elapsed: %.3f seconds" % result["elapsed_seconds"])
 
 
 def main():
@@ -339,8 +363,8 @@ def main():
         "-tl",
         "--timelimit",
         nargs=1,
-        type=int,
-        help="Set a timelimit for the search in seconds\n",
+        type=float,
+        help="Search budget in seconds, shared across optimization attempts (-1 = unlimited; 0 = no search time)\n",
     )
     parser.add_argument(
         "-tk",
@@ -453,11 +477,12 @@ def main():
 
     # Handle reducebasis action
     if params.get("_action") == "reducebasis":
-        search.search_using_reducebasis(params)
-        return
+        result = search.search_using_reducebasis(params)
+    else:
+        result = startsearch(params)
 
-    # Start the solver
-    startsearch(params)
+    _print_result(result)
+    return result
 
 
 if __name__ == "__main__":

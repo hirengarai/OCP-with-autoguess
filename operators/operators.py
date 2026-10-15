@@ -237,6 +237,10 @@ class NoneOperator(Operator):
     def generate_model(self, model_type='sat'):
         return []
 
+    def gen_autoguess_constr(self):
+        """Explicitly empty: this operator represents an intentionally absent operation."""
+        return []
+
 
 class CopyOperator(Operator):
     """Duplicate one input into multiple outputs (b_0, b_1, ..., b_n = a)."""
@@ -250,6 +254,9 @@ class CopyOperator(Operator):
         require_variable_count(self.__class__.__name__, input_vars, 1, "input")
         require_min_variable_count(self.__class__.__name__, output_vars, 2, "output")
         super().__init__(input_vars, output_vars, ID=ID)
+
+    def gen_autoguess_constr(self):
+        return [f"{self.input_vars[0].ID}, {v.ID}" for v in self.output_vars]
 
     def generate_implementation(self, implementation_type='python', unroll=False):
         self.check_supported_implementation(implementation_type)
@@ -539,7 +546,7 @@ class Rot(UnaryOperator):
                 f"{len(in_vars)} inputs vs {len(out_vars)} outputs"
             )
 
-        suffix = ", NONRENAME" if treat_as_nonrename else ""
+        suffix = ", NONRENAME" if treat_as_nonrename else ", KNOWLEDGE_EQ"
         return [f"{in_bit}, {out_bit}{suffix}" for in_bit, out_bit in zip(in_vars, out_vars)]
 
 

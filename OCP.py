@@ -142,6 +142,10 @@ def test_gd_attack_sat(cipher, known_vars, objective_target="EXISTENCE", config_
 
     # Search for the guess basis
     result = attacks.guess_and_determine_attack(cipher, goal=goal, known_vars=known_vars, objective_target=objective_target, show_mode=show_mode, config_model=config_model, config_solver=config_solver)
+    if result["status"] != "sat":
+        print(f"[TEST] Guess-basis search: {result['status']}")
+        return result
+    assert result["targets_covered"]
     print(f"[TEST] Guess basis ({len(result['guessed_variables'])}): {[v.ID for v in result['guessed_variables']]}")
     return result
 
@@ -189,9 +193,9 @@ if __name__ == "__main__":
     test_linear_attack_milp(cipher)
     test_linear_attack_sat(cipher)
 
-    # AES guess-and-determine example: with plaintext and ciphertext known, guessing
-    # 6 more words determines the whole 96-word state. "AT MOST 6" is used instead of
-    # "OPTIMAL" because the minimisation loop takes ~64s to reach the same answer.
+    # AES relation-system example: intentionally skip encryption round 2 and
+    # bridge the gap. Six additional eight-bit words determine the configured
+    # system; this does not claim recovery for the complete two-round cipher.
     import primitives.aes as aes
     aes_cipher = aes.AES_BLOCKCIPHER(2, [128, 128])
     aes_func = aes_cipher.functions["PERMUTATION"]

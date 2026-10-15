@@ -45,6 +45,10 @@ def test_gd_skinny_tk2():
         },
     )
 
+    assert result["status"] == "sat", result["status"]
+    assert result["targets_covered"]
+    assert len(result["guessed_variable_ids"]) <= 31
+    assert len(result["guessed_variables"]) == len(result["guessed_variable_ids"])
     print(f"[TEST] Guess basis ({len(result['guessed_variables'])}): "
           f"{[v.ID for v in result['guessed_variables']]}")
     return result

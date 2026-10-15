@@ -44,8 +44,12 @@ def validate_packed_gf2_u64(mat: np.ndarray, ncols: int) -> None:
     """
     if ncols < 0:
         raise ValueError("ncols must be non-negative")
+    if mat.ndim != 2:
+        raise ValueError("mat must be two-dimensional")
     if mat.dtype != np.uint64:
         raise TypeError("mat must be a uint64 array")
+    if mat.shape[1] != (ncols + 63) // 64:
+        raise ValueError("packed width does not match ncols")
     if not mat.flags["C_CONTIGUOUS"]:
         raise ValueError("mat must be C-contiguous")
 
@@ -67,9 +71,15 @@ class GF2Poly:
     Each monomial is represented as a frozenset of variable names.
     """
 
-    def __init__(self, monomials: Iterable[FrozenSet[str]] = ()): 
-        # Initialize the polynomial with given monomials (each a frozenset).
-        self.monomials: Set[FrozenSet[str]] = set(monomials)
+    def __init__(self, monomials: Iterable[FrozenSet[str]] = ()):
+        # Repeated terms cancel, just as they do in addition over GF(2).
+        self.monomials: Set[FrozenSet[str]] = set()
+        for monomial in monomials:
+            mono = frozenset(monomial)
+            if mono in self.monomials:
+                self.monomials.remove(mono)
+            else:
+                self.monomials.add(mono)
 
     def __xor__(self, other: "GF2Poly") -> "GF2Poly":
         """
@@ -142,17 +152,29 @@ def const(bit: int) -> GF2Poly:
 
 # ---------------------------------------------------------------------
 # Very small recursive-descent parser for Boolean-polynomial expressions
-# Supports +, *, ^, parentheses, and 0/1 literals.
+# Supports +, -, *, ^/**, parentheses, and integer literals modulo 2.
 # ---------------------------------------------------------------------
-_token = re.compile(r'\s*([A-Za-z_]\w*|\d+|\^|\*|\+|\(|\))')
+_token = re.compile(r'[A-Za-z_]\w*|[0-9]+|\*\*|[\^*+()\-]')
 
 def parse_gf2poly(text: str) -> GF2Poly:
     """
-    Parse an expression like "x*(x^4 + 1)" into a GF2Poly.
-    Exponents are ignored (x^k -> x), and idempotence (x^2 = x) holds.
+    Parse a polynomial in GF(2)[x,...]/(x^2+x,...).
+
+    Powers must have non-negative integer exponents. Every positive power
+    of a Boolean polynomial equals itself; the zeroth power equals 1.
+    Unsupported characters and incomplete expressions raise SyntaxError.
     """
-    # Tokenize input string
-    toks = [t for t in _token.findall(text) if t.strip()]
+    toks = []
+    offset = 0
+    while offset < len(text):
+        if text[offset].isspace():
+            offset += 1
+            continue
+        match = _token.match(text, offset)
+        if match is None:
+            raise SyntaxError(f"unexpected character at position {offset}: {text[offset]!r}")
+        toks.append(match.group())
+        offset = match.end()
     pos = 0
 
     def nexttok() -> str:
@@ -161,36 +183,45 @@ def parse_gf2poly(text: str) -> GF2Poly:
     def parse_sum() -> GF2Poly:
         nonlocal pos
         poly = parse_prod()
-        while nexttok() == '+':
-            pos += 1  # consume '+'
+        while nexttok() in ('+', '-'):
+            pos += 1
             poly = poly + parse_prod()
         return poly
 
     def parse_prod() -> GF2Poly:
         nonlocal pos
-        term = GF2Poly([frozenset()])  # start with 1
-        while True:
-            t = nexttok()
-            if t is None or t in '+)':
-                break
-            if t == '(':  # parenthesized subexpression
-                pos += 1
-                factor = parse_sum()
-                if nexttok() != ')':
-                    raise SyntaxError("missing ')'")
-                pos += 1  # consume ')'
-            else:
-                name = t
-                pos += 1
-                # Skip any exponent '^k'
-                if nexttok() == '^':
-                    pos += 2
-                factor = const(int(name)) if name.isdigit() else var(name)
-
-            term = term * factor
-            if nexttok() == '*':
-                pos += 1  # consume '*'
+        term = parse_factor()
+        while nexttok() == '*':
+            pos += 1
+            term = term * parse_factor()
         return term
+
+    def parse_factor() -> GF2Poly:
+        nonlocal pos
+        # Unary signs coincide over GF(2).
+        while nexttok() in ('+', '-'):
+            pos += 1
+        token = nexttok()
+        if token == '(':
+            pos += 1
+            factor = parse_sum()
+            if nexttok() != ')':
+                raise SyntaxError("missing ')'")
+            pos += 1
+        elif token is not None and (token.isdigit() or re.fullmatch(r'[A-Za-z_]\w*', token)):
+            pos += 1
+            factor = const(int(token)) if token.isdigit() else var(token)
+        else:
+            raise SyntaxError(f"expected a polynomial term, got {token!r}")
+        if nexttok() in ('^', '**'):
+            pos += 1
+            exponent = nexttok()
+            if exponent is None or not exponent.isdigit():
+                raise SyntaxError("exponent must be a non-negative integer")
+            pos += 1
+            if int(exponent) == 0:
+                factor = const(1)
+        return factor
 
     result = parse_sum()
     if pos != len(toks):

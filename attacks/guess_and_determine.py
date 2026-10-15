@@ -32,16 +32,17 @@ The user-facing wrapper with timing lives in `attacks.attacks` as
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
+import hashlib
 from pathlib import Path
 from typing import List, Optional
 
-from tools.autoguess_wrapper import run_autoguess
+from tools.autoguess_wrapper import _variable_dictionary, run_autoguess
 from tools.relation_generator import generate_relations
 
 
 ROOT = Path(__file__).resolve().parents[1]
 # Relation files and AutoGuess outputs land here. This is where the existing
-# (git-tracked) artifacts live, and where relation_generator resolves relative
+# generated artifacts live, and where relation_generator resolves relative
 # paths, so the two stay in agreement. Override via config_model["filename"].
 FILES_DIR = ROOT / "test" / "autoguess" / "files"
 
@@ -133,7 +134,7 @@ class SolverConfig:
     cpsolver: str = "cp-sat"
     milpdirection: str = "min"
     cpoptimization: int = 1
-    timelimit: int = -1
+    timelimit: float = -1
     threads: int = 0
     preprocess: int = 0
     tikz: int = 0
@@ -146,7 +147,7 @@ _RELGEN_KEYS = {f.name for f in fields(RelGenConfig)}
 # config_model keys consumed by this module rather than forwarded to the generator.
 _MODEL_LOCAL_KEYS = {"model_type", "filename", "name_prefix", "maxsteps"}
 _MODEL_KEYS = _RELGEN_KEYS | _MODEL_LOCAL_KEYS
-_SOLVER_KEYS = {"solver", "timelimit", "threads", "preprocess",
+_SOLVER_KEYS = {"solver", "time_limit", "timelimit", "threads", "preprocess",
                 "milpdirection", "cpoptimization", "dglayout"}
 
 
@@ -166,6 +167,8 @@ def _parse_objective_target(objective_target):
     'AT LEAST X' have no AutoGuess counterpart and are rejected rather than
     silently reinterpreted.
     """
+    if not isinstance(objective_target, str):
+        raise ValueError("objective_target must be a string")
     if objective_target == "EXISTENCE":
         return False, None
     if objective_target == "OPTIMAL":
@@ -210,8 +213,23 @@ def _parse_and_set_configs(cipher_or_function, goal, objective_target, config_mo
     config_solver = dict(config_solver or {})
     _reject_unknown_keys("config_model", config_model, _MODEL_KEYS)
     _reject_unknown_keys("config_solver", config_solver, _SOLVER_KEYS)
+    if "time_limit" in config_solver:
+        # bool and other numeric types can compare equal to valid 0/1 values;
+        # do not hide an invalid legacy value when normalizing the aliases.
+        if "timelimit" in config_solver:
+            legacy_limit = config_solver["timelimit"]
+            if isinstance(legacy_limit, bool) or not isinstance(legacy_limit, (int, float)):
+                raise ValueError("Time limit must be nonnegative or -1 (finite numeric values only)")
+        if ("timelimit" in config_solver
+                and config_solver["timelimit"] != config_solver["time_limit"]):
+            raise ValueError("config_solver['time_limit'] and ['timelimit'] must match when both are supplied")
+        # Keep the internal dataclass spelling while accepting the upstream
+        # backend attribute name at OCP's public configuration boundary.
+        config_solver["timelimit"] = config_solver.pop("time_limit")
 
     # Set "model_type", the automated model framework.
+    if not isinstance(config_model.get("model_type", "sat"), str):
+        raise ValueError("config_model['model_type'] must be a string")
     config_model["model_type"] = config_model.get("model_type", "sat").lower()
     if config_model["model_type"] not in MODEL_TYPES:
         raise ValueError(f"Invalid model_type: {config_model['model_type']}. Expected one of {list(MODEL_TYPES)}.")
@@ -223,7 +241,8 @@ def _parse_and_set_configs(cipher_or_function, goal, objective_target, config_mo
         filename = _default_relation_filename(cipher_or_function, config_model.get("name_prefix"))
     if not Path(filename).is_absolute():
         filename = str(FILES_DIR / filename)
-    config_model["filename"] = filename
+    config_model["filename"] = str(Path(filename).expanduser().resolve())
+    Path(config_model["filename"]).parent.mkdir(parents=True, exist_ok=True)
 
     # Set "solver" for solving the model.
     config_solver.setdefault("solver", "DEFAULT")
@@ -231,11 +250,11 @@ def _parse_and_set_configs(cipher_or_function, goal, objective_target, config_mo
     return config_model, config_solver
 
 
-def _backend_kwargs(model_type, solver):
+def _backend_kwargs(model_type, solver, timelimit=-1):
     """Map the single OCP-style ``solver`` key onto AutoGuess' per-framework backend argument.
 
-    'DEFAULT' keeps run_autoguess' own default for the framework, matching how
-    the other OCP attacks treat config_solver["solver"].
+    Timed SAT searches use an interruptible default. An explicitly selected
+    backend is preserved, so unsupported time limits still fail clearly.
     """
     arg = _BACKEND_ARG.get(model_type)
     if arg is None:
@@ -243,7 +262,11 @@ def _backend_kwargs(model_type, solver):
             print(f"[WARNING] config_solver['solver']='{solver}' ignored: model_type='{model_type}' "
                   f"has no selectable backend. Applicable to {sorted(_BACKEND_ARG)}.")
         return {}
-    return {} if solver == "DEFAULT" else {arg: solver}
+    if solver == "DEFAULT":
+        if model_type == "sat" and timelimit != -1:
+            return {arg: "glucose3"}
+        return {}
+    return {arg: solver}
 
 
 def _verbosity_kwargs(show_mode):
@@ -289,7 +312,8 @@ def search_guess_basis(cipher_or_function, goal="GUESSBASIS", known_vars=None,
             ``_parse_and_set_configs``. Accepts ``"model_type"``, ``"filename"``,
             ``"name_prefix"``, ``"maxsteps"`` and every ``RelGenConfig`` field.
         config_solver (dict, optional): Advanced solver options; see
-            ``_parse_and_set_configs``. Accepts ``"solver"``, ``"timelimit"``,
+            ``_parse_and_set_configs``. Accepts ``"solver"``, ``"time_limit"``
+            (or its existing spelling ``"timelimit"``),
             ``"threads"``, ``"preprocess"``, ``"milpdirection"``,
             ``"cpoptimization"`` and ``"dglayout"``.
 
@@ -316,11 +340,34 @@ def search_guess_basis(cipher_or_function, goal="GUESSBASIS", known_vars=None,
         raise ValueError(f"Invalid config_solver: {config_solver}. Expected a dictionary or None.")
     findmin, maxguess = _parse_objective_target(objective_target)
 
+    variables = _variable_dictionary(cipher_or_function)
+    for label, value in (("known_vars", known_vars), ("target_vars", target_vars),
+                         ("not_guessed_vars", not_guessed_vars)):
+        if value is not None:
+            if any(not isinstance(vid, str) for vid in value):
+                raise ValueError(f"{label} must contain variable ID strings")
+            unknown = sorted(set(value) - variables.keys())
+            if unknown:
+                raise ValueError(f"Unknown OCP variable IDs in {label}: {unknown}")
+    if goal == "REDUCEBASIS" and not known_vars:
+        raise ValueError("REDUCEBASIS requires a basis in known_vars")
+    if goal == "REDUCEBASIS" and objective_target != "EXISTENCE":
+        raise ValueError("REDUCEBASIS reduces the supplied basis; use objective_target='EXISTENCE'")
+
     # Step 1. Parse and set model and solver configurations.
     config_model, config_solver = _parse_and_set_configs(cipher_or_function, goal, objective_target,
                                                          config_model, config_solver)
     model_type, relation_file = config_model["model_type"], config_model["filename"]
     function_mode = not hasattr(cipher_or_function, "functions")
+    if goal == "GUESSBASIS" and model_type in {"mark", "elim", "propagate"} and objective_target != "EXISTENCE":
+        raise ValueError(f"model_type='{model_type}' does not support objective_target='{objective_target}'")
+    if findmin and model_type == "cp" and config_solver.get("cpoptimization", 1) != 1:
+        raise ValueError("OPTIMAL with CP requires cpoptimization=1")
+    if findmin and model_type == "milp" and config_solver.get("milpdirection", "min") != "min":
+        raise ValueError("OPTIMAL with MILP requires milpdirection='min'")
+    maxsteps = config_model.get("maxsteps")
+    if maxsteps is not None and (type(maxsteps) is not int or maxsteps < 0):
+        raise ValueError("config_model['maxsteps'] must be a nonnegative integer or None")
 
     # Step 2. Keep at least one target unguessable, otherwise the solver returns
     # the trivial basis "guess the targets".
@@ -330,11 +377,11 @@ def search_guess_basis(cipher_or_function, goal="GUESSBASIS", known_vars=None,
             ng.update(target_vars)
         elif not ng.intersection(target_vars):
             ng.add(target_vars[0])
-        not_guessed_vars = list(ng)
+        not_guessed_vars = sorted(ng)
 
     # Step 3. Generate the relation system for the cipher.
     relgen_cfg = RelGenConfig(**{k: v for k, v in config_model.items() if k in _RELGEN_KEYS})
-    generate_relations(
+    relations = generate_relations(
         cipher_or_function,
         function_mode=function_mode,
         known=known_vars,
@@ -352,7 +399,7 @@ def search_guess_basis(cipher_or_function, goal="GUESSBASIS", known_vars=None,
         maxguess=maxguess,
         maxsteps=config_model.get("maxsteps"),
         reducebasis=(goal == "REDUCEBASIS"),
-        **_backend_kwargs(model_type, config_solver["solver"]),
+        **_backend_kwargs(model_type, config_solver["solver"], config_solver.get("timelimit", -1)),
         **{k: v for k, v in config_solver.items() if k != "solver"},
         **_verbosity_kwargs(show_mode),
     )
@@ -360,10 +407,43 @@ def search_guess_basis(cipher_or_function, goal="GUESSBASIS", known_vars=None,
         Path(relation_file).parent
         / Path(relation_file).stem.replace("relations_", "output_")
     )
-    return run_autoguess(
+    # Known IDs in the cleaned file may differ from the caller's IDs after
+    # alias substitution. Do not add the original names as disconnected knowns.
+    basis = None
+    if goal == "REDUCEBASIS":
+        basis = []
+        relation_lines = []
+        in_known = False
+        for line in relations:
+            if line == "known":
+                in_known = True
+                continue
+            elif line in {"connection relations", "algebraic relations", "target", "not guessed", "end"}:
+                in_known = False
+            if in_known:
+                basis.append(line)
+            else:
+                relation_lines.append(line)
+        # These are removable guesses, not fixed prior knowledge. The low-level
+        # reducer separately supports genuine fixed knowns in its input file.
+        Path(relation_file).write_text("\n".join(relation_lines) + "\n")
+    result = run_autoguess(
         inputfile=relation_file,
         cipher_or_function=cipher_or_function,
         outputfile=ag_outputfile,
-        known=known_vars,
+        known=basis,
         **asdict(solver_cfg),
     )
+    if result["status"] == "sat" and maxguess is not None and len(result["guessed_variable_ids"]) > maxguess:
+        raise RuntimeError("AutoGuess returned a basis exceeding the requested guess bound")
+    result.update({
+        "relation_file": relation_file,
+        "model_hash": hashlib.sha256(Path(relation_file).read_bytes()).hexdigest(),
+        "model_config": config_model,
+        "solver_config": config_solver,
+        "goal": goal,
+        "objective_target": objective_target,
+        "requested_known_variable_ids": list(known_vars or []),
+        "requested_target_variable_ids": list(target_vars or []),
+    })
+    return result

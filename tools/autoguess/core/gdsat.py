@@ -35,6 +35,7 @@ from core.parsesolution import parse_solver_solution
 from core.graphdrawer import draw_graph
 from config import TEMP_DIR
 from core.varnames import step_var, path_var
+from core.solverresult import solve_sat
 
 
 class ReduceGDtoSAT:
@@ -112,7 +113,6 @@ class ReduceGDtoSAT:
         self.top_variable_identifier_so_far = 0
         self.deductions = self.generate_possible_deductions()
         self.cnf_formula = formula.CNF()
-        self.solver = solvers.Solver(name=self.sat_solver_name)
         self.time_limit = -1
         self.tikz = tikz
 
@@ -381,6 +381,9 @@ class ReduceGDtoSAT:
         solve the derived CNF formula
         """
 
+        self.optimal = False
+        self.timed_out = False
+        self.termination_reason = "unknown"
         if self.sat_solver_name in solvers.SolverNames.__dict__.keys():
             sat_solver = solvers.Solver(name=self.sat_solver_name)
         else:
@@ -389,38 +392,31 @@ class ReduceGDtoSAT:
                 % ", ".join(self.supported_sat_solvers)
             )
             return
-        sat_solver.append_formula(self.cnf_formula)
         print("-" * 60)
         print("SOLVING")
         print("-" * 60)
         start_time = time.time()
-        # Regarding time_limit: Note that only MiniSat-like solvers support this functionality (e.g. Cadical and Lingeling do not
-        # support it).
-        _no_timelimit_solvers = set()
-        for _sn in ("cadical103", "cadical153", "cadical195", "lingeling"):
-            _no_timelimit_solvers.update(getattr(solvers.SolverNames, _sn, ()))
-        if self.time_limit != -1:
-            if self.sat_solver_name in _no_timelimit_solvers:
-                print("time_limit is not supported for the chosen sat solver ... ")
-                result = sat_solver.solve()
-            else:
-                timer = Timer(self.time_limit, self.interrupt, [sat_solver])
-                timer.start()
-                result = sat_solver.solve_limited(expect_interrupt=True)
-        else:
-            result = sat_solver.solve()
+        try:
+            sat_solver.append_formula(self.cnf_formula)
+            result = solve_sat(sat_solver, self.sat_solver_name, self.time_limit)
+            self.satsolver_solution = sat_solver.get_model() if result is True else None
+        except KeyboardInterrupt:
+            self.termination_reason = "interrupted"
+            return None
+        finally:
+            sat_solver.delete()
         elapsed_time = time.time() - start_time
         print("Solving finished in %0.2f seconds" % elapsed_time)
         if result == True:
-            self.satsolver_solution = sat_solver.get_model()
+            self.termination_reason = "solution_found"
+            positive = set(literal for literal in self.satsolver_solution if literal > 0)
             self.solutions = [0] * (self.max_steps + 1)
             for step in range(self.max_steps + 1):
                 state_vars = [step_var(v, step) for v in self.variables]
                 state_values = list(
                     map(
                         lambda x: int(
-                            self.satsolver_solution[self.variables_dictionary[x] - 1]
-                            > 0
+                            self.variables_dictionary[x] in positive
                         ),
                         [st_var for st_var in state_vars],
                     )
@@ -439,6 +435,7 @@ class ReduceGDtoSAT:
                 )
             return True
         elif result == False:
+            self.termination_reason = "infeasible"
             print("\n" + "=" * 60)
             print("RESULT: UNSATISFIABLE")
             print("The problem is UNSAT!")
@@ -446,9 +443,10 @@ class ReduceGDtoSAT:
             print("=" * 60)
             return False
         else:
+            self.timed_out = self.time_limit != -1
+            self.termination_reason = "time_limit" if self.timed_out else "unknown"
             print("\n" + "=" * 60)
-            print("RESULT: TIMEOUT")
-            print("The solver was interrupted before finding any solution.")
+            print("RESULT: %s" % self.termination_reason.upper())
+            print("The solver stopped before finding any solution.")
             print("=" * 60)
             return None
-        sat_solver.delete()

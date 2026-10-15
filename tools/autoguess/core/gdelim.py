@@ -49,9 +49,11 @@ class Elim:
         preprocess=1,
         D=1,
         extra_known=None,
+        log=0,
     ):
         Elim.count += 1
         self.inputfile_name = inputfile_name
+        self.log = log
         self.output_dir = outputfile_name
         self.rnd_string_tmp = "%030x" % random.randrange(16**30)
         ###############################

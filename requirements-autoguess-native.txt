@@ -1,0 +1,5 @@
+# Optional native CP/SMT validation, in the normal OCP Python environment.
+-r requirements-autoguess.txt
+minizinc==0.10.0
+PySMT==0.9.6
+z3-solver==4.16.0.0

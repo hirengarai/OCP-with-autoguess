@@ -10,67 +10,69 @@ This wrapper handles that path setup, then exposes a simple function:
     from tools.autoguess_wrapper import run_autoguess
 
     run_autoguess(
-        cipher,
-        inputfile='relations_aes_2r.txt',
+        'relations_aes_2r.txt',
+        cipher_or_function=cipher,
         solver='sat',
         findmin=True,
     )
 
-AutoGuess itself is NOT modified — it stays self-contained.
+Results come directly from the solver, never from a previously written report.
 """
 
 import functools
 import os
-import re
 import sys
+import threading
 from pathlib import Path
 
 # Path to the autoguess directory inside OCP
 _AUTOGUESS_DIR = Path(__file__).resolve().parent / "autoguess"
+_AUTOGUESS_LOCK = threading.RLock()
 
 
 def _with_autoguess_path(func):
     """
-    Decorator that temporarily adds autoguess/ to sys.path,
-    changes cwd to autoguess/, runs the function, then restores both.
+    Temporarily make the vendored imports available, without changing cwd.
 
-    AutoGuess expects:
-      - sys.path to include its own directory (for 'from core.xxx' imports)
-      - cwd to be its own directory (for 'temp/' relative paths)
+    Absolute input/output/temp paths avoid changing the caller's process-wide
+    working directory. Serialize our import/config setup for concurrent calls.
     """
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        old_path = sys.path[:]
-        old_cwd = os.getcwd()
-
-        try:
-            # Add autoguess dir to front of sys.path
-            ag_str = str(_AUTOGUESS_DIR)
-            if ag_str not in sys.path:
-                sys.path.insert(0, ag_str)
-
-            # Change to autoguess dir so relative paths work
-            os.chdir(_AUTOGUESS_DIR)
-
-            # Override TEMP_DIR to store temp files in test/autoguess/files/temp/
-            import config as ag_config
-
-            old_temp_dir = ag_config.TEMP_DIR
-            temp_dir = str(
-                _AUTOGUESS_DIR.parents[1] / "test" / "autoguess" / "files" / "temp"
-            )
-            ag_config.TEMP_DIR = temp_dir
-            os.makedirs(temp_dir, exist_ok=True)
-
+        with _AUTOGUESS_LOCK:
+            old_path = sys.path[:]
             try:
-                return func(*args, **kwargs)
+                ag_str = str(_AUTOGUESS_DIR)
+                if ag_str not in sys.path:
+                    sys.path.insert(0, ag_str)
+                import config as ag_config
+
+                old_temp_dir = ag_config.TEMP_DIR
+                temp_dir = str(
+                    _AUTOGUESS_DIR.parents[1] / "test" / "autoguess" / "files" / "temp"
+                )
+                ag_config.TEMP_DIR = temp_dir
+                os.makedirs(temp_dir, exist_ok=True)
+                # Vendored modules use ``from config import TEMP_DIR``. A
+                # direct import before this wrapper otherwise leaves a stale
+                # relative path, dependent on notebook/test import order.
+                cached_temp_dirs = []
+                for name, module in list(sys.modules.items()):
+                    if not name.startswith(("core.", "autoguess", "tools.autoguess.")):
+                        continue
+                    filename = getattr(module, "__file__", None)
+                    if filename and Path(filename).resolve().is_relative_to(_AUTOGUESS_DIR) and hasattr(module, "TEMP_DIR"):
+                        cached_temp_dirs.append((module, module.TEMP_DIR))
+                        module.TEMP_DIR = temp_dir
+                try:
+                    return func(*args, **kwargs)
+                finally:
+                    for module, previous in cached_temp_dirs:
+                        module.TEMP_DIR = previous
+                    ag_config.TEMP_DIR = old_temp_dir
             finally:
-                ag_config.TEMP_DIR = old_temp_dir
-        finally:
-            # Restore original state
-            sys.path[:] = old_path
-            os.chdir(old_cwd)
+                sys.path[:] = old_path
 
     return wrapper
 
@@ -105,100 +107,58 @@ def _default_params():
     }
 
 
-def _parse_autoguess_output(output_path, vars_dict):
-    """
-    Parse the AutoGuess output file and convert variable IDs to OCP Variable objects.
+def _variable_dictionary(cipher_or_function):
+    """Resolve both complete primitives and single Layered_Function objects."""
+    result = dict(getattr(cipher_or_function, "vars_dictionary", {}) or {})
+    visited = set()
 
-    Parameters
-    ----------
-    output_path : str
-        Path to the AutoGuess output file.
-    vars_dict : dict
-        Mapping from variable ID strings to Variable objects (cipher.vars_dictionary).
+    def visit(value):
+        if id(value) in visited:
+            return
+        visited.add(id(value))
+        if isinstance(value, dict):
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                visit(child)
+        elif hasattr(value, "ID"):
+            result[value.ID] = value
+            visit(getattr(value, "copied_vars", ()))
 
-    Returns
-    -------
-    dict with keys:
-        outputfile, known_variables, target_variables, guessed_variables,
-        determination_steps
-    """
-    result = {
-        "outputfile": output_path,
-        "known_variables": [],
-        "target_variables": [],
-        "guessed_variables": [],
-        "determination_steps": [],
-    }
+    functions = getattr(cipher_or_function, "functions", {})
+    for function in functions.values() if isinstance(functions, dict) else ():
+        visit(getattr(function, "vars", ()))
+    visit(getattr(cipher_or_function, "vars", ()))
+    visit(getattr(cipher_or_function, "inputs", ()))
+    visit(getattr(cipher_or_function, "outputs", ()))
+    return result
 
-    if not os.path.exists(output_path):
-        return result
 
-    with open(output_path, "r") as f:
-        content = f.read()
+def _resolve_result(result, cipher_or_function):
+    """Attach OCP objects while retaining every original ID, including dummies."""
+    result = dict(result)
+    variables = _variable_dictionary(cipher_or_function)
+    unresolved = set()
 
-    separator = "############################################################"
-    sections = content.split(separator)
+    def resolve(ids):
+        unresolved.update(vid for vid in ids if vid not in variables)
+        return [variables[vid] for vid in ids if vid in variables]
 
-    def _resolve_vars(id_string):
-        """Split comma-separated var IDs and resolve to Variable objects."""
-        ids = [v.strip() for v in id_string.split(",") if v.strip()]
-        resolved = []
-        for vid in ids:
-            # Strip dummy annotations like " (represents: ...)"
-            clean_id = vid.split(" (represents:")[0].strip()
-            if clean_id in vars_dict:
-                resolved.append(vars_dict[clean_id])
-        return resolved
-
-    # parsesolution.py writes the separator after every State block, so the
-    # determination flow is split across multiple chunks. current_step must
-    # persist across sections to accumulate State 0, State 1, ...
-    current_step = None
-
-    for section in sections:
-        stripped = section.strip()
-
-        # Guessed variables section
-        if "variable(s) are guessed:" in stripped:
-            lines = stripped.split("\n")
-            for line in lines:
-                if "variable(s) are guessed:" in line:
-                    continue
-                if line.strip():
-                    result["guessed_variables"] = _resolve_vars(line)
-
-        # Known variables section
-        elif "variable(s) are initially known:" in stripped:
-            lines = stripped.split("\n")
-            for line in lines:
-                if "variable(s) are initially known:" in line:
-                    continue
-                if line.strip():
-                    result["known_variables"] = _resolve_vars(line)
-
-        # Target variables section
-        elif stripped.startswith("Target variables:"):
-            lines = stripped.split("\n")
-            for line in lines[1:]:
-                if line.strip():
-                    result["target_variables"] = _resolve_vars(line)
-
-        # Determination flow: header chunk OR a continuation State X chunk
-        elif stripped.startswith("Determination flow:") or re.match(
-            r"State\s+\d+:", stripped
-        ):
-            for line in stripped.split("\n"):
-                state_match = re.match(r"State\s+(\d+):", line)
-                if state_match:
-                    current_step = {
-                        "step": int(state_match.group(1)),
-                        "determined_vars": [],
-                    }
-                    result["determination_steps"].append(current_step)
-                elif current_step is not None and "===>" in line:
-                    rhs = line.split("===>")[1].strip()
-                    current_step["determined_vars"].extend(_resolve_vars(rhs))
-
+    for role in ("known", "target", "guessed"):
+        ids = list(result.get(f"{role}_variables", []))
+        result[f"{role}_variable_ids"] = ids
+        result[f"{role}_variables"] = resolve(ids)
+    steps = []
+    for step in result.get("determination_steps", []):
+        step = dict(step)
+        ids = list(step.get("determined_vars", []))
+        step["determined_var_ids"] = ids
+        step["determined_vars"] = resolve(ids)
+        steps.append(step)
+    result["determination_steps"] = steps
+    result["unresolved_variable_ids"] = sorted(unresolved)
+    result["cipher"] = cipher_or_function
     return result
 
 
@@ -215,7 +175,7 @@ def run_autoguess(
     reducebasis=False,
     known=None,
     drawgraph=True,
-    satsolver="cadical153",
+    satsolver=None,
     smtsolver="z3",
     cpsolver="cp-sat",
     milpdirection="min",
@@ -230,6 +190,7 @@ def run_autoguess(
     term_ordering="degrevlex",
     overlapping_number=2,
     cnf_to_anf_conversion="simple",
+    time_limit=None,
 ):
     """
     Run AutoGuess on a relation file.
@@ -237,7 +198,7 @@ def run_autoguess(
     Parameters
     ----------
     inputfile : str
-        Path to the relation file (absolute or relative to OCP root).
+        Path to the relation file (absolute or relative to the caller's cwd).
 
     cipher_or_function : Cipher or Function object, optional
         OCP cipher/function whose vars_dictionary is used to resolve
@@ -257,6 +218,19 @@ def run_autoguess(
 
     reducebasis : bool
         Reduce a guess basis (requires known variables).
+
+    time_limit : float, optional
+        One search budget in seconds, shared by preprocessing, model creation,
+        and all optimization attempts. ``-1`` is unlimited; ``0`` permits no
+        search time. Result verification and report writing can finish afterward.
+
+    timelimit : float
+        Existing spelling of ``time_limit``, retained for compatibility. If both
+        are supplied, a non-default ``timelimit`` must equal ``time_limit``.
+
+    satsolver : str, optional
+        PySAT backend. When omitted, timed SAT uses interruptible ``glucose3``;
+        unlimited SAT uses ``cadical153``. Explicit choices are preserved.
 
     known : list of str, optional
         Extra known variables.
@@ -281,14 +255,30 @@ def run_autoguess(
                     ...
                 ],
             }
-        Otherwise: the raw AutoGuess parameters dict.
+        Every result includes ``status`` (sat/unsat/unknown), ``optimal``,
+        ``termination_reason``, ``timed_out``, ``elapsed_seconds``,
+        ``time_limit`` (also available as ``time_limit_seconds``) and ID lists.
+        A timeout returns a validated
+        incumbent with ``status='sat'`` and ``optimal=False``, or ``unknown``
+        when no complete basis was found. Without a cipher/function the variable
+        lists contain IDs.
     """
+    from core.solverresult import get_time_limit
+
+    time_options = {"timelimit": timelimit}
+    if time_limit is not None:
+        if timelimit == -1:
+            time_options = {"time_limit": time_limit}
+        else:
+            time_options["time_limit"] = time_limit
+    time_limit = get_time_limit(time_options)
+
     # Build params dict
     params = _default_params()
     params.update(
         {
-            "inputfile": str(inputfile),
-            "outputfile": outputfile,
+            "inputfile": str(Path(inputfile).expanduser().resolve()),
+            "outputfile": str(Path(outputfile).expanduser().resolve()),
             "solver": solver,
             "maxguess": maxguess,
             "maxsteps": maxsteps,
@@ -296,12 +286,15 @@ def run_autoguess(
             "reducebasis": reducebasis,
             "known": known,
             "drawgraph": drawgraph,
-            "satsolver": satsolver,
+            "satsolver": satsolver if satsolver is not None else (
+                "glucose3" if solver == "sat" and time_limit != -1 else "cadical153"
+            ),
             "smtsolver": smtsolver,
             "cpsolver": cpsolver,
             "milpdirection": milpdirection,
             "cpoptimization": cpoptimization,
-            "timelimit": timelimit,
+            "time_limit": time_limit,
+            "timelimit": time_limit,
             "preprocess": preprocess,
             "D": D,
             "tikz": tikz,
@@ -322,14 +315,11 @@ def run_autoguess(
     if reducebasis:
         params["solver"] = "propagate"
         params["reducebasis"] = True
-    startsearch(params)
-
-    # If a cipher/function was provided, parse output and return Variable objects
+    Path(params["outputfile"]).parent.mkdir(parents=True, exist_ok=True)
+    result = startsearch(params)
+    if not isinstance(result, dict) or result.get("status") not in {"sat", "unsat", "unknown"}:
+        raise RuntimeError("AutoGuess did not return a structured solver result")
+    result["parameters"] = dict(params)
     if cipher_or_function is not None:
-        vars_dict = getattr(cipher_or_function, "vars_dictionary", {})
-        output_path = str(_AUTOGUESS_DIR / params["outputfile"])
-        result = _parse_autoguess_output(output_path, vars_dict)
-        result["cipher"] = cipher_or_function
-        return result
-
-    return params
+        return _resolve_result(result, cipher_or_function)
+    return result
