@@ -7,6 +7,8 @@ Provides:
 3. guess-and-determine attacks
 4. two-stage differential/linear trail search (truncated- then bit-level)
 5. integral attacks
+6. impossible-differential distinguisher search
+7. zero-correlation linear distinguisher search
 
 Other types of attacks to be contributed in the future.
 """
@@ -16,14 +18,22 @@ import attacks.differential_cryptanalysis as diff
 import attacks.linear_cryptanalysis as linear
 import attacks.guess_and_determine as gd
 import attacks.integral_cryptanalysis as integral
+import attacks.impossible_differential as impossible_diff
+import attacks.zero_corr_linear as zero_corr
 from tools.model_constraints import gen_predefined_constraints
 
 
 
 # =================== Differential Attacks ===================
-def diff_attacks(cipher, goal="DIFFERENTIALPATH_PROB", constraints=None,
-                 objective_target="OPTIMAL", show_mode=0, config_model=None,
-                 config_solver=None):
+def diff_attacks(
+    cipher,
+    goal="DIFFERENTIALPATH_PROB",
+    constraints=None,
+    objective_target="OPTIMAL",
+    show_mode=0,
+    config_model=None,
+    config_solver=None,
+):
     """Search for differential trails of the given cipher.
 
     See :func:`~attacks.differential_cryptanalysis.search_diff_trail` for the
@@ -33,17 +43,29 @@ def diff_attacks(cipher, goal="DIFFERENTIALPATH_PROB", constraints=None,
         list: The differential trail objects found.
     """
     time_start = time.time()
-    trails = diff.search_diff_trail(cipher, goal=goal, constraints=constraints,
-                                    objective_target=objective_target, show_mode=show_mode,
-                                    config_model=config_model, config_solver=config_solver)
+    trails = diff.search_diff_trail(
+        cipher,
+        goal=goal,
+        constraints=constraints,
+        objective_target=objective_target,
+        show_mode=show_mode,
+        config_model=config_model,
+        config_solver=config_solver,
+    )
     print(f"--- Total Time ---: {time.time() - time_start:.2f} seconds")
     return trails
 
 
 # =================== Linear Attacks ===================
-def linear_attacks(cipher, goal="LINEARPATH_CORR", constraints=None,
-                   objective_target="OPTIMAL", show_mode=0, config_model=None,
-                   config_solver=None):
+def linear_attacks(
+    cipher,
+    goal="LINEARPATH_CORR",
+    constraints=None,
+    objective_target="OPTIMAL",
+    show_mode=0,
+    config_model=None,
+    config_solver=None,
+):
     """Search for linear trails of the given cipher.
 
     See :func:`~attacks.linear_cryptanalysis.search_linear_trail` for the
@@ -53,9 +75,15 @@ def linear_attacks(cipher, goal="LINEARPATH_CORR", constraints=None,
         list: The linear trail objects found.
     """
     time_start = time.time()
-    trails = linear.search_linear_trail(cipher, goal=goal, constraints=constraints,
-                                        objective_target=objective_target, show_mode=show_mode,
-                                        config_model=config_model, config_solver=config_solver)
+    trails = linear.search_linear_trail(
+        cipher,
+        goal=goal,
+        constraints=constraints,
+        objective_target=objective_target,
+        show_mode=show_mode,
+        config_model=config_model,
+        config_solver=config_solver,
+    )
     print(f"--- Total Time ---: {time.time() - time_start:.2f} seconds")
     return trails
 
@@ -85,9 +113,15 @@ def guess_and_determine_attack(cipher, goal="GUESSBASIS", known_vars=None, targe
     return result
 
 # =================== Two-Stage Trail Search ===================
-def two_stage_trail_search(cipher_factory, r, goal="DIFFERENTIALPATH_PROB",
-                           stage1_config_model=None, stage2_config_model=None,
-                           stage1_config_solver=None, stage2_config_solver=None):
+def two_stage_trail_search(
+    cipher_factory,
+    r,
+    goal="DIFFERENTIALPATH_PROB",
+    stage1_config_model=None,
+    stage2_config_model=None,
+    stage1_config_solver=None,
+    stage2_config_solver=None,
+):
     """Two-stage (truncated- then bit-level) trail search for word-oriented ciphers.
 
     Stage 1 searches a minimum-active-S-box truncated pattern; stage 2 fixes that
@@ -112,6 +146,7 @@ def two_stage_trail_search(cipher_factory, r, goal="DIFFERENTIALPATH_PROB",
         active S-box count and the stage-2 best trail weight, or None if no
         truncated trail is found.
     """
+    time_start = time.time()
     if goal == "DIFFERENTIALPATH_PROB":
         stage1_goal, weight_key, attack = "TRUNCATEDDIFF_SBOXCOUNT", "diff_weight", diff_attacks
     elif goal == "LINEARPATH_CORR":
@@ -121,11 +156,18 @@ def two_stage_trail_search(cipher_factory, r, goal="DIFFERENTIALPATH_PROB",
 
     # Stage 1: search the truncated trail with minimum active S-boxes.
     cipher1 = cipher_factory(r)
-    trails1 = attack(cipher1, goal=stage1_goal, constraints=["INPUT_NOT_ZERO"],
-                     objective_target="OPTIMAL", config_model=stage1_config_model,
-                     config_solver=stage1_config_solver, show_mode=2) or []
+    trails1 = attack(
+        cipher1,
+        goal=stage1_goal,
+        constraints=["INPUT_NOT_ZERO"],
+        objective_target="OPTIMAL",
+        config_model=stage1_config_model,
+        config_solver=stage1_config_solver,
+        show_mode=2,
+    ) or []
     if not trails1:
         print("[INFO] no truncated trail found.")
+        print(f"--- Total Time ---: {time.time() - time_start:.2f} seconds")
         return None
     min_active = trails1[0].data[weight_key]
     print(f"[Stage 1] minimum active S-boxes = {min_active}")
@@ -146,18 +188,31 @@ def two_stage_trail_search(cipher_factory, r, goal="DIFFERENTIALPATH_PROB",
     stage2_model_type = (stage2_config_model or {}).get("model_type", "milp")
     cipher2 = cipher_factory(r)
     stage2_cons = _fix_activity(stage2_model_type, cipher2, trails1[0])
-    trails2 = attack(cipher2, goal=goal, constraints=stage2_cons,
-                     objective_target="OPTIMAL", config_model=stage2_config_model,
-                     config_solver=stage2_config_solver, show_mode=2) or []
+    trails2 = attack(
+        cipher2,
+        goal=goal,
+        constraints=stage2_cons,
+        objective_target="OPTIMAL",
+        config_model=stage2_config_model,
+        config_solver=stage2_config_solver,
+        show_mode=2,
+    ) or []
     best_weight = trails2[0].data[weight_key] if trails2 else None
     print(f"[Stage 2] best trail weight = {best_weight}")
+    print(f"--- Total Time ---: {time.time() - time_start:.2f} seconds")
     return min_active, best_weight
 
 
 # =================== Integral Attacks ===================
-def integral_attacks(cipher, goal="INTEGRAL_TWOSUBSET", constraints=None,
-                     objective_target="EXISTENCE", show_mode=0, config_model=None,
-                     config_solver=None):
+def integral_attacks(
+    cipher,
+    goal="INTEGRAL_TWOSUBSET",
+    constraints=None,
+    objective_target="EXISTENCE",
+    show_mode=0,
+    config_model=None,
+    config_solver=None,
+):
     """Search for integral distinguishers of the given cipher.
 
     See :func:`~attacks.integral_cryptanalysis.search_integral_distinguisher` for
@@ -167,9 +222,75 @@ def integral_attacks(cipher, goal="INTEGRAL_TWOSUBSET", constraints=None,
         list: The integral distinguisher objects found.
     """
     time_start = time.time()
-    distinguishers = integral.search_integral_distinguisher(cipher, goal=goal, constraints=constraints,
-                                                            objective_target=objective_target, show_mode=show_mode,
-                                                            config_model=config_model, config_solver=config_solver)
+    distinguishers = integral.search_integral_distinguisher(
+        cipher,
+        goal=goal,
+        constraints=constraints,
+        objective_target=objective_target,
+        show_mode=show_mode,
+        config_model=config_model,
+        config_solver=config_solver,
+    )
+    print(f"--- Total Time ---: {time.time() - time_start:.2f} seconds")
+    return distinguishers
+
+
+# =================== Impossible-Differential Attacks ===================
+def impossible_differential_attacks(
+    cipher,
+    goal="IMPOSSIBLETRUNCATEDDIFF",
+    strategy="ENUMERATION",
+    config_model=None,
+    config_solver=None,
+    show_mode=0,
+):
+    """Search for impossible-differential distinguishers of the given cipher.
+
+    See :func:`~attacks.impossible_differential.search_impossible_differential`
+    for the accepted strategies and parameters.
+
+    Returns:
+        list: The impossible ``(in_positions, out_positions)`` pairs found.
+    """
+    time_start = time.time()
+    distinguishers = impossible_diff.search_impossible_differential(
+        cipher,
+        goal=goal,
+        strategy=strategy,
+        config_model=config_model,
+        config_solver=config_solver,
+        show_mode=show_mode,
+    )
+    print(f"--- Total Time ---: {time.time() - time_start:.2f} seconds")
+    return distinguishers
+
+
+# =================== Zero-Correlation Linear Attacks ===================
+def zero_correlation_attacks(
+    cipher,
+    goal="ZEROCORRELATIONTRUNCATEDLINEAR",
+    strategy="ENUMERATION",
+    config_model=None,
+    config_solver=None,
+    show_mode=0,
+):
+    """Search for zero-correlation linear distinguishers of the given cipher.
+
+    See :func:`~attacks.zero_corr_linear.search_zero_correlation` for the
+    accepted strategies and parameters.
+
+    Returns:
+        list: The zero-correlation ``(in_positions, out_positions)`` pairs found.
+    """
+    time_start = time.time()
+    distinguishers = zero_corr.search_zero_correlation(
+        cipher,
+        goal=goal,
+        strategy=strategy,
+        config_model=config_model,
+        config_solver=config_solver,
+        show_mode=show_mode,
+    )
     print(f"--- Total Time ---: {time.time() - time_start:.2f} seconds")
     return distinguishers
 

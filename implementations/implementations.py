@@ -1,49 +1,61 @@
+"""Implementation generation and testing for primitives.
+
+Emits an executable implementation of a primitive/cipher in Python, C, or Verilog.
+"""
+
 import os, os.path
+import sys
 import subprocess
 import ctypes
 import traceback
 import numpy as np
-import importlib
+import importlib.util
 from contextlib import redirect_stdout
 import shutil
+from tools.paths import get_files_dir
 
-# function to check if a C compiler is available
+IMPLEMENTED_LANGUAGES = ("python", "c", "verilog") # 'rust' is planned
+
+
 def is_c_compiler_available():
     """Check if gcc or any C compiler is available in the system."""
-    # Check for common C compilers
     compilers = ['gcc', 'clang', 'cl', 'cc']
     for compiler in compilers:
         if shutil.which(compiler) is not None:
             return True, compiler
     return False, None
 
-# function to check if a Verilog compiler/simulator is available
 def is_verilog_compiler_available():
     """Check if iverilog or another Verilog compiler is available in the system."""
-    # Check for common Verilog compilers/simulators
     compilers = ['iverilog', 'verilog', 'vlog']
     for compiler in compilers:
         if shutil.which(compiler) is not None:
             return True, compiler
     return False, None
 
-# function to check if a Rust compiler is available
 def is_rust_compiler_available():
     """Check if rustc compiler is available in the system."""
     if shutil.which('rustc') is not None:
         return True
     return False
 
-# function that selects the variable bitsize when generating C code
-def get_var_def_c(word_bitsize):   
+def get_var_def_c(word_bitsize):
+    """Return the C fixed-width integer type able to hold a word of ``word_bitsize`` bits."""
     if word_bitsize <= 8: return 'uint8_t'
     elif word_bitsize <= 32: return 'uint32_t'
     elif word_bitsize <= 64: return 'uint64_t'
     else: return 'uint128_t'
 
-# function that generates the implementation of the primitive
-def generate_implementation(my_prim, filename, language = 'python', unroll = False):  
-    
+def generate_implementation(my_prim, filename, language = 'python', unroll = False):
+    """Generate ``my_prim``'s reference implementation and write it to ``filename``.
+
+    ``language`` is one of 'python' / 'c' / 'verilog'; 'rust' is planned. With ``unroll`` True the rounds are
+    fully unrolled (round indices baked into variable names); otherwise a rolled loop is emitted.
+    """
+    if language not in IMPLEMENTED_LANGUAGES:
+        hint = " (planned, not implemented)" if language == "rust" else ""
+        raise ValueError(f"[ERROR] Unknown implementation language: {language}{hint}. "
+                         f"Expected one of {sorted(IMPLEMENTED_LANGUAGES)}.")
     nbr_rounds = my_prim.nbr_rounds
     
     os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
@@ -330,26 +342,67 @@ def generate_implementation(my_prim, filename, language = 'python', unroll = Fal
             pass  # To be implemented in the future
 
 
+def _generated_path(cipher_name, extension):
+    return os.path.join(str(get_files_dir()), f"{cipher_name}.{extension}")
+
+
+def _fresh_import_generated(cipher_name):
+    """Import the generated <cipher_name>.py by path, recompiled from the current source.
+
+    A plain import/reload can reuse a stale .pyc when the file is rewritten within the same
+    mtime tick (as the KAT self-repair does), so drop its cached bytecode first.
+    """
+    src = _generated_path(cipher_name, "py")
+    if not os.path.exists(src):
+        raise ModuleNotFoundError(f"generated implementation not found: {src}")
+    mod_name = f"files.{cipher_name}"
+    try:
+        pyc = importlib.util.cache_from_source(src)
+        if os.path.exists(pyc):
+            os.remove(pyc)
+    except Exception:
+        pass                                     # best effort: a missing pyc just means a clean import
+    spec = importlib.util.spec_from_file_location(mod_name, src)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def evaluate_python(cipher, inputs, cipher_name=None, output_len=None):
+    """Run a cipher's generated Python implementation on concrete inputs.
+
+    Generate the implementation first with generate_implementation(); this only
+    imports and runs it. ``inputs`` is the list of input word-lists in the cipher's
+    input order - e.g. ``[[plaintext_words], [key_words]]`` for a block cipher, or
+    ``[[state_words]]`` for a permutation. Returns the list of output words.
+    """
+    cipher_name = cipher_name or cipher.name
+    with open(os.devnull, "w") as f, redirect_stdout(f):
+        imp_cipher = _fresh_import_generated(cipher_name)
+    func = getattr(imp_cipher, f"{cipher.name}")
+    if output_len is None:
+        output_len = sum(len(cipher.outputs[name]) for name in cipher.outputs)
+    result = [0 for _ in range(output_len)]
+    func(*inputs, result)
+    return result
+
+
 def test_implementation_python(cipher, cipher_name, input, output):
+    """Run the generated Python implementation of ``cipher`` on ``input`` and check it matches the
+    expected ``output``. Returns True/False, or None if the implementation file is not built yet."""
     print(f"\n****************TEST PYTHON IMPLEMENTATION of {cipher_name}****************")
-    
+
     # Check if Python implementation file exists
-    py_file = f"files/{cipher_name}.py"
+    py_file = _generated_path(cipher_name, "py")
     if not os.path.exists(py_file):
         print(f"[INFO] Python implementation file '{py_file}' not found. Skipping Python test.")
         print(f"       The implementation should be generated first using generate_implementation().")
         return None
-    
+
     print("Test input = ", [hex(i2) for i1 in input for i2 in i1])
     print("Test output = ", [hex(i) for i in output])
     try:
-        with open(os.devnull, "w") as f, redirect_stdout(f):
-            imp_cipher = importlib.import_module(f"files.{cipher_name}")
-            importlib.reload(imp_cipher)
-        func = getattr(imp_cipher, f"{cipher.name}")
-        result = [0 for _ in range(len(output))]
-
-        func(*input, result)
+        result = evaluate_python(cipher, input, cipher_name=cipher_name, output_len=len(output))
         print("Test result = ", [hex(i) for i in result])
 
         if result == output:
@@ -359,10 +412,10 @@ def test_implementation_python(cipher, cipher_name, input, output):
             print(f'!!!!!!!!!!!!!!!!!Wrong!!!!!!!!!!!!!!!!!\nTest result is not equal to expected Test output')
             return False
     except ImportError as e:
-        print(f"[ERROR] Implementation module files.{cipher_name} cannot be loaded: {e}\n")
+        print(f"[ERROR] Implementation '{py_file}' cannot be loaded: {e}\n")
         return False
     except AttributeError as e:
-        print(f"[ERROR] Function {cipher.name} not found in module files.{cipher_name}: {e}\n")
+        print(f"[ERROR] Function {cipher.name} not found in '{py_file}': {e}\n")
         return False
     except Exception as e:
         print(f"[ERROR] Function {cipher.name} failed: {e}.\n")
@@ -371,6 +424,8 @@ def test_implementation_python(cipher, cipher_name, input, output):
 
 
 def test_implementation_c(cipher, cipher_name, input, output):
+    """Compile and run the generated C implementation of ``cipher`` on ``input`` and check it matches
+    ``output``. Returns True/False, or None if the C compiler or implementation file is unavailable."""
     print(f"\n****************TEST C IMPLEMENTATION of {cipher_name}****************")
     
     # Check if C compiler is available
@@ -381,7 +436,7 @@ def test_implementation_c(cipher, cipher_name, input, output):
         return None
     
     # Check if C implementation file exists
-    c_file = f"files/{cipher_name}.c"
+    c_file = _generated_path(cipher_name, "c")
     if not os.path.exists(c_file):
         print(f"[INFO] C implementation file '{c_file}' not found. Skipping C test.")
         print(f"       The implementation should be generated first using generate_implementation().")
@@ -407,8 +462,9 @@ def test_implementation_c(cipher, cipher_name, input, output):
     result = np.zeros(len(output), dtype=dtype_np)
     output = np.array(output, dtype=dtype_np)
 
-    compile_command = f"{compiler} files/{cipher_name}.c -o files/{cipher_name}.out"
-    compile_process = subprocess.run(compile_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out_file = _generated_path(cipher_name, "out")
+    compile_process = subprocess.run([compiler, c_file, "-o", out_file],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if compile_process.returncode != 0:
         print(f"[ERROR] Compilation failed for {cipher_name}.c")
         print(f"        Compiler: {compiler}")
@@ -416,7 +472,7 @@ def test_implementation_c(cipher, cipher_name, input, output):
         return False
 
     try:
-        func = getattr(ctypes.CDLL(f"files/{cipher_name}.out"), cipher.name)
+        func = getattr(ctypes.CDLL(out_file), cipher.name)
         func.argtypes = [ctypes.POINTER(dtype_ct)] * (len(args_np) + 1)
         func_args = [arr.ctypes.data_as(ctypes.POINTER(dtype_ct)) for arr in args_np]
         func_args.append(result.ctypes.data_as(ctypes.POINTER(dtype_ct)))
@@ -435,6 +491,8 @@ def test_implementation_c(cipher, cipher_name, input, output):
         return False
 
 def test_implementation_verilog(cipher, cipher_name, input, output):
+    """Compile and run the generated Verilog implementation of ``cipher`` on ``input`` and check it
+    matches ``output``. Returns True/False, or None if the Verilog toolchain or file is unavailable."""
     print(f"\n****************TEST VERILOG IMPLEMENTATION of {cipher_name}****************")
 
     # Check if Verilog compiler is available
@@ -446,7 +504,7 @@ def test_implementation_verilog(cipher, cipher_name, input, output):
         return None
 
     # Check if Verilog implementation file exists
-    sv_file = f"files/{cipher_name}.sv"
+    sv_file = _generated_path(cipher_name, "sv")
     if not os.path.exists(sv_file):
         print(f"[INFO] Verilog implementation file '{sv_file}' not found. Skipping Verilog test.")
         print(f"       The implementation should be generated first using generate_implementation().")
@@ -457,12 +515,15 @@ def test_implementation_verilog(cipher, cipher_name, input, output):
 
     print(f"[INFO] Verilog compiler detected: {compiler}")
     print("       Use a verilog compiler/simulator to test the generated verilog implementation.")
-    print(f"       Example: {compiler} -g2012 -o files/{cipher_name}.out files/{cipher_name}.sv")
-    print(f"                .\\files/{cipher_name}.out")
+    sv_out = _generated_path(cipher_name, "out")
+    print(f"       Example: {compiler} -g2012 -o {sv_out} {sv_file}")
+    print(f"                {sv_out}")
     print("[INFO] Automated Verilog testing is not yet implemented in this function.")
     return None
 
 def test_implementation_rust(cipher, cipher_name, input, output):
+    """Compile and run the generated Rust implementation of ``cipher`` on ``input`` and check it
+    matches ``output``. Returns True/False, or None if the Rust toolchain or file is unavailable."""
     print(f"\n****************TEST RUST IMPLEMENTATION of {cipher_name}****************")
     
     # Check if Rust compiler is available
@@ -472,7 +533,7 @@ def test_implementation_rust(cipher, cipher_name, input, output):
         return None
     
     # Check if Rust implementation file exists
-    rust_file = f"files/{cipher_name}.rs"
+    rust_file = _generated_path(cipher_name, "rs")
     if not os.path.exists(rust_file):
         print(f"[INFO] Rust implementation file '{rust_file}' not found. Skipping Rust test.")
         print(f"       The implementation should be generated first using generate_implementation().")
@@ -499,15 +560,16 @@ def test_implementation_rust(cipher, cipher_name, input, output):
     result = np.zeros(len(output), dtype=dtype_np)
     output = np.array(output, dtype=dtype_np)
 
-    compile_command = f"rustc --crate-type cdylib -o files/{cipher_name}.dll files/{cipher_name}.rs"
-    compile_process = subprocess.run(compile_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    dll_file = _generated_path(cipher_name, "dll")
+    compile_process = subprocess.run(["rustc", "--crate-type", "cdylib", "-o", dll_file, rust_file],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if compile_process.returncode != 0:
         print(f"[ERROR] Compilation failed for {cipher_name}.rs")
         print(f"        Error output: {compile_process.stderr.decode()}")
         return False
 
     try:
-        func = getattr(ctypes.CDLL(f"files/{cipher_name}.dll"), cipher.name)
+        func = getattr(ctypes.CDLL(dll_file), cipher.name)
         func.argtypes = [ctypes.POINTER(dtype_ct)] * (len(args_np) + 1)
         func_args = [arr.ctypes.data_as(ctypes.POINTER(dtype_ct)) for arr in args_np]
         func_args.append(result.ctypes.data_as(ctypes.POINTER(dtype_ct)))

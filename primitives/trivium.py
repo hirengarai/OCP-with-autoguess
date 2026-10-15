@@ -1,4 +1,9 @@
-# Not ready for use, still in development.
+"""Trivium: the Trivium stream cipher.
+
+Not ready for use, still in development."""
+
+IN_DEVELOPMENT = True
+
 from primitives.primitives import Stream_cipher
 from operators.boolean_operators import XOR, AND
 from operators.operators import Equal
@@ -16,14 +21,16 @@ class Trivium_Stream_Cipher(Stream_cipher):
     def __init__(self, name, iv_input, k_input, keystream_output, nbr_rounds_init=1152, nbr_rounds_update=1, nbr_rounds_keystream=1, represent_mode=0):
         """
         Initialize the Trivium stream cipher
-        :param name: Name of the cipher
-        :param iv_input: Input IV (80 bits as 80 1-bit variables)
-        :param k_input: Input Key (80 bits as 80 1-bit variables)
-        :param keystream_output: Output keystream
-        :param nbr_rounds_init: Number of initialization rounds (default: 1152)
-        :param nbr_rounds_update: Number of state update rounds (default: 1)
-        :param nbr_rounds_keystream: Number of keystream generation rounds (default: 1)
-        :param represent_mode: Integer specifying the mode of representation
+
+        Args:
+            name: Name of the cipher
+            iv_input: Input IV (80 bits as 80 1-bit variables)
+            k_input: Input Key (80 bits as 80 1-bit variables)
+            keystream_output: Output keystream
+            nbr_rounds_init: Number of initialization rounds (default: 1152)
+            nbr_rounds_update: Number of state update rounds (default: 1)
+            nbr_rounds_keystream: Number of keystream generation rounds (default: 1)
+            represent_mode: Integer specifying the mode of representation
         """
         
         if represent_mode == 0:
@@ -132,7 +139,7 @@ class Trivium_Stream_Cipher(Stream_cipher):
                 # For now, using a simplified pass-through
                 KEYSTREAM.AddIdentityLayer("KEYSTREAM_GEN", i, 0)
     
-    def gen_test_vectors(self):
+    def gen_test_vectors(self, rounds=None, version=None):
         """
         Generate test vectors for Trivium
         Test vectors can be found in the eSTREAM documentation
@@ -148,12 +155,16 @@ class Trivium_Stream_Cipher(Stream_cipher):
 def TRIVIUM(nbr_rounds_init=1152, nbr_rounds_update=1, nbr_rounds_keystream=1, represent_mode=0, copy_operator=False):
     """
     Create a Trivium stream cipher instance
-    :param nbr_rounds_init: Number of initialization rounds (default: 1152)
-    :param nbr_rounds_update: Number of state update rounds (default: 1)
-    :param nbr_rounds_keystream: Number of keystream generation rounds (default: 1)
-    :param represent_mode: Representation mode
-    :param copy_operator: Whether to add copy operators
-    :return: Trivium stream cipher instance
+
+    Args:
+        nbr_rounds_init: Number of initialization rounds (default: 1152)
+        nbr_rounds_update: Number of state update rounds (default: 1)
+        nbr_rounds_keystream: Number of keystream generation rounds (default: 1)
+        represent_mode: Representation mode
+        copy_operator: Whether to add copy operators
+
+    Returns:
+        Trivium stream cipher instance
     """
     # Create IV input: 80 bits
     iv_input = [var.Variable(1, ID="iv" + str(i)) for i in range(80)]
@@ -179,4 +190,3 @@ def TRIVIUM(nbr_rounds_init=1152, nbr_rounds_update=1, nbr_rounds_keystream=1, r
     my_cipher.gen_test_vectors()
     
     return my_cipher
-

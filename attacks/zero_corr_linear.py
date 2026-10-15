@@ -2,25 +2,23 @@
 
 Provides:
 
-1. search for zero-correlation distinguishers (by feasibility enumeration)
+1. search_zero_correlation: strategy dispatcher (default "ENUMERATION")
+2. search_zc_distinguisher_enumeration: distinguisher search by feasibility enumeration
 """
 
-from pathlib import Path
 from itertools import combinations
 import time
 
-from tools.model_constraints import fill_functions_rounds_layers_positions, gen_round_model_constraint_obj_fun, gen_predefined_constraints
-from attacks.linear_cryptanalysis import configure_model_version
+from tools.model_configuration import (ZEROCORR_GOAL_MIDDLE, fill_functions_rounds_layers_positions,
+                                       gen_round_model_constraint_obj_fun)
+from tools.model_constraints import gen_fixed_activity_constraints
 import tools.milp_search as milp_search
 import tools.sat_search as sat_search
-
-ROOT = Path(__file__).resolve().parents[1]
-FILES_DIR = ROOT / "files"
+from tools.paths import get_files_dir
 
 # Map the user-facing goal to the concrete distinguisher model goal and its granularity.
 #   ZEROCORRELATIONTRUNCATEDLINEAR -> word-level truncated;  ZEROCORRELATIONLINEAR -> bit-level.
-_GOAL_MIDDLE = {"ZEROCORRELATIONTRUNCATEDLINEAR": "TRUNCATEDLINEAR_SBOXCOUNT",
-                "ZEROCORRELATIONLINEAR": "LINEAR_SBOXCOUNT"}
+_GOAL_MIDDLE = ZEROCORR_GOAL_MIDDLE   # shared vocabulary; see tools/model_configuration.py
 
 
 def _parse_and_set_configs(cipher, goal, config_model, config_solver):
@@ -42,25 +40,14 @@ def _parse_and_set_configs(cipher, goal, config_model, config_solver):
     # Set "solver" for solving the model
     config_solver.setdefault("solver", "DEFAULT")
 
-    FILES_DIR.mkdir(parents=True, exist_ok=True)  # ensure the output directory exists (lazy)
-    # Set the model "filename".
+    # Set the model "filename" (get_files_dir honours OCP_FILES_DIR and creates the directory).
+    files_dir = get_files_dir()
     if config_model["model_type"] == "milp":
-        config_model["filename"] = str(FILES_DIR / f"{cipher.nbr_rounds}round_{cipher.name}_{goal}_milp_model.lp")
+        config_model["filename"] = str(files_dir / f"{cipher.nbr_rounds}round_{cipher.name}_{goal}_milp_model.lp")
     elif config_model["model_type"] == "sat":
-        config_model["filename"] = str(FILES_DIR / f"{cipher.nbr_rounds}round_{cipher.name}_{goal}_sat_model.cnf")
+        config_model["filename"] = str(files_dir / f"{cipher.nbr_rounds}round_{cipher.name}_{goal}_sat_model.cnf")
 
     return config_model, config_solver
-
-
-def _gen_fixed_activity_constraints(vars_, active_positions, model_type="milp", bitwise=False):
-    """Fix a mask pattern over the boundary vars: active positions -> 1, the rest -> 0.
-    bitwise=False: word-level (one unit per var); bitwise=True: bit-level (one unit per bit)."""
-    ids = [f"{v.ID}_{j}" for v in vars_ for j in range(v.bitsize)] if bitwise else [v.ID for v in vars_]
-    active = set(active_positions)
-    cons = []
-    for i, vid in enumerate(ids):
-        cons += gen_predefined_constraints(model_type, "EXACTLY", [vid], 1 if i in active else 0, bitwise=False)
-    return cons
 
 
 def _verify_zero_correlation(base_cons, obj, fix_constraints, model_type, config_model, config_solver):
@@ -74,6 +61,22 @@ def _verify_zero_correlation(base_cons, obj, fix_constraints, model_type, config
     else:
         raise ValueError(f"Unsupported model_type: {model_type}. Expected 'milp' or 'sat'.")
     return not solutions   # no trail -> confirmed zero-correlation
+
+
+# ---------------------------- strategy dispatcher ----------------------------
+def search_zero_correlation(cipher, goal="ZEROCORRELATIONTRUNCATEDLINEAR", strategy="ENUMERATION",
+                            config_model=None, config_solver=None, show_mode=0):
+    """Zero-correlation linear search:
+           Gamma_in --> Gamma_X --[distinguisher]--> Gamma_Y --> Gamma_out
+
+    goal: "ZEROCORRELATIONTRUNCATEDLINEAR" (word-level truncated) or "ZEROCORRELATIONLINEAR" (bit-level).
+    strategy: the search strategy.
+        "ENUMERATION": see :func:`search_zc_distinguisher_enumeration`.
+    """
+    if strategy == "ENUMERATION":
+        return search_zc_distinguisher_enumeration(cipher, goal=goal, config_model=config_model,
+                                                   config_solver=config_solver, show_mode=show_mode)
+    raise ValueError(f"Unsupported strategy: {strategy!r}. Expected 'ENUMERATION'.")
 
 
 # ---------------------------- distinguisher search ----------------------------
@@ -91,7 +94,7 @@ def search_zc_distinguisher_enumeration(cipher, goal="ZEROCORRELATIONTRUNCATEDLI
         2. S. Sun, D. Gerault, P. Lafourcade, Q. Yang, Y. Todo, K. Qiao, L. Hu, "Analysis of AES, SKINNY, and others with Constraint Programming", ToSC 2017(1), 281-306.
     """
     if goal not in _GOAL_MIDDLE:
-        raise ValueError(f"Invalid goal: {goal}. Expected one of {list(_GOAL_MIDDLE)}.")
+        raise ValueError(f"[ERROR] Invalid goal: {goal}. Expected one of {list(_GOAL_MIDDLE)}.")
     goal_middle = _GOAL_MIDDLE[goal]
     config_model, config_solver = _parse_and_set_configs(cipher, goal, config_model, config_solver)
     model_type, bitwise = config_model["model_type"], ("TRUNCATEDLINEAR" not in goal_middle)
@@ -115,20 +118,19 @@ def search_zc_distinguisher_enumeration(cipher, goal="ZEROCORRELATIONTRUNCATEDLI
 
     # Build the base model once (configure operator versions, then generate round constraints);
     # only the fixed (Gamma_X, Gamma_Y) constraints change per iteration.
-    configure_model_version(cipher, goal_middle, config_model)
-    base_cons, obj = gen_round_model_constraint_obj_fun(cipher, model_type, config_model)
+    base_cons, obj = gen_round_model_constraint_obj_fun(cipher, goal_middle, config_model)
 
     # Enumerate (Gamma_X, Gamma_Y): active counts wi/wo in the configured ranges, then their positions.
     zero_corr, tested, start = [], 0, time.time()
     for wi in range(enum.get("min_active_in", 1), enum.get("max_active_in", 1) + 1):
         for in_pos in combinations(cand_in, wi):
-            fix_in = _gen_fixed_activity_constraints(gx_vars, in_pos, model_type, bitwise)   # built once per Gamma_X
+            fix_in = gen_fixed_activity_constraints(gx_vars, in_pos, model_type, bitwise)   # built once per Gamma_X
             for wo in range(enum.get("min_active_out", 1), enum.get("max_active_out", 1) + 1):
                 if max_total is not None and wi + wo > max_total:
                     continue
                 for out_pos in combinations(cand_out, wo):
                     tested += 1
-                    fix = fix_in + _gen_fixed_activity_constraints(gy_vars, out_pos, model_type, bitwise)
+                    fix = fix_in + gen_fixed_activity_constraints(gy_vars, out_pos, model_type, bitwise)
                     if _verify_zero_correlation(base_cons, obj, fix, model_type, config_model, config_solver):
                         zero_corr.append((in_pos, out_pos))
     if show_mode:

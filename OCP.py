@@ -13,15 +13,13 @@ For examples of other ciphers, refer to the following folders:
 - test/autoguess
 """
 
-from pathlib import Path
 
-from kiwisolver import Variable
 import implementations.implementations as imp
 import visualisations.visualisations as vis
 import attacks.attacks as attacks
+from tools.paths import get_files_dir
 
-FILES_DIR = Path("files")
-FILES_DIR.mkdir(parents=True, exist_ok=True)
+FILES_DIR = get_files_dir()
 
 # ********************* IMPLEMENTATIONS ********************* #
 def test_python_imp(cipher): # Generate Python implementation and test it with the test vectors
