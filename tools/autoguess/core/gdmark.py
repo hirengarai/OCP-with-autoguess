@@ -20,15 +20,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 In case you use this tool please include the above copyright informations (name, contact, license)
 """
 
-from logging import root
-import os
-import time
 import random
+from core.console import progress
 from core.inputparser import read_relation_file
-from threading import Timer
-from core.parsesolution import parse_solver_solution
-from core.graphdrawer import draw_graph
-from config import TEMP_DIR
 from operator import itemgetter
 
 
@@ -50,6 +44,7 @@ class Mark:
         D=1,
         extra_known=None,
         log=0,
+        prepared_data=None,
     ):
         Mark.count += 1
         self.inputfile_name = inputfile_name
@@ -58,7 +53,8 @@ class Mark:
         self.rnd_string_tmp = "%030x" % random.randrange(16**30)
         ###############################
         # Read and parse the input file
-        parsed_data = read_relation_file(
+        from copy import deepcopy
+        parsed_data = deepcopy(prepared_data) if prepared_data is not None else read_relation_file(
             self.inputfile_name,
             preprocess=preprocess,
             D=D,
@@ -174,5 +170,5 @@ class Mark:
                 if self.dependency_matrix_columns[self.get_index(v)]["known"] == 1
             ]
             i += 1
-        print("Number of guessed variables %d" % len(self.guess_basis))
-        print("Guess basis: %s" % self.guess_basis)
+        progress("Number of guessed variables %d" % len(self.guess_basis))
+        progress("Guess basis: %s" % self.guess_basis)

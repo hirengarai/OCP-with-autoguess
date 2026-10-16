@@ -6,6 +6,29 @@ The entry point follows the same shape as every other OCP attack (`diff_attacks`
 `linear_attacks`, `integral_attacks`): a cipher, a `goal`, an `objective_target`,
 a `show_mode`, and two plain configuration dicts.
 
+## Installation
+
+From the repository root, using Python 3.12:
+
+```sh
+python3.12 -m venv env312
+source env312/bin/activate
+python -m pip install -r requirements-autoguess.txt
+```
+
+SAT, MaxSAT and Sage-free preprocessing use these runtime requirements. Install
+the packages for any optional backend you want to use:
+
+```sh
+python -m pip install minizinc==0.10.0                  # CP
+python -m pip install PySMT==0.9.6 z3-solver==4.16.0.0  # SMT/Z3
+python -m pip install gurobipy==13.0.2                 # MILP
+```
+
+CP also needs a MiniZinc executable and a solver backend. MILP needs a suitable
+Gurobi license. Graph rendering needs the Graphviz system executable; use
+`show_mode=0` to run without images. Normal tool use does not require SageMath.
+
 ## Quick start
 
 ```python
@@ -34,6 +57,16 @@ a claim about recovery for the complete two-round cipher. The corrected model
 recovers all 96 exported variables from those six guesses within 14 steps.
 `result["guessed_variables"]`, `result["determination_steps"]`, and the output
 files (below) describe the current successful run. Always check `status` first.
+
+The final console summary includes:
+
+```text
+STATUS: SAT
+Termination: solution_found
+Targets covered: 96 / 96
+Guess cost: 6
+Optimal: not established
+```
 
 Both bounds matter. Left to their defaults, `maxguess` is the total cost of all
 unknown variables (their count in an unweighted OCP model), and `maxsteps` is
@@ -66,6 +99,10 @@ guess_and_determine_attack(
 Unlike the trail searches there is no `constraints` argument: the problem is
 stated through the `known_vars` / `target_vars` / `not_guessed_vars` roles.
 
+When targets are supplied, the first target is protected from guessing unless
+`not_guessed_vars` already protects a target. Set `protect_all_targets=True`
+to protect every target.
+
 ### `goal`
 
 `goal` is which question you are asking AutoGuess — the same slot that
@@ -73,19 +110,21 @@ stated through the `known_vars` / `target_vars` / `not_guessed_vars` roles.
 
 | Value | Meaning |
 |---|---|
-| `"GUESSBASIS"` | Find a set of variables whose values, once guessed, let every remaining variable be deduced by propagation (default) |
-| `"REDUCEBASIS"` | Start from the basis passed in `known_vars` and drop the members that turn out to be redundant. Requires `known_vars`, and forces the `propagate` backend regardless of `config_model["model_type"]` |
+| `"GUESSBASIS"` | Find guesses that recover every requested target; without explicit targets, recover all modeled variables (default) |
+| `"REDUCEBASIS"` | Find a smallest sufficient subset of the basis in `known_vars` using solver-free propagation; use the default model type |
 
 ### `objective_target`
 
 | Value | Meaning |
 |---|---|
-| `"EXISTENCE"` | One solve: return any guess basis within the total possible unknown-variable cost, no minimisation (default) |
+| `"EXISTENCE"` | Return a basis within the default unknown-variable cost cap; MaxSAT and the default CP/MILP settings minimize |
 | `"OPTIMAL"` | Minimize within the configured relation model and propagation depth; check `optimal` to distinguish a proven minimum from a feasible incumbent |
-| `"AT MOST X"` | One solve with `maxguess = X`: return any basis of size ≤ X, or nothing if none exists |
+| `"AT MOST X"` | Set the guess-cost cap to X; check `status` for a feasible basis, infeasibility or an inconclusive search |
 
-Mechanically these set just two AutoGuess flags — `(findmin, maxguess)` =
-`(False, None)`, `(True, None)`, `(False, X)`.
+SAT and SMT use iterative minimization for `OPTIMAL`. CP and MILP use their
+native minimization settings. MaxSAT always minimizes, including when a cost
+cap is supplied. Costs count modeled variables, or explicit weights in a
+relation file; they are not automatically key bits.
 
 OCP's `"EXACTLY X"` and `"AT LEAST X"` have no AutoGuess counterpart and raise `ValueError`.
 
@@ -106,7 +145,7 @@ Both configs are plain dicts. An unrecognised key raises `ValueError` listing th
 
 | Key | Default | Description |
 |---|---|---|
-| `model_type` | `"sat"` | `sat \| milp \| smt \| cp \| mark \| elim \| propagate` — the framework the problem is encoded into |
+| `model_type` | `"sat"` | `sat \| maxsat \| milp \| smt \| cp \| mark \| elim \| propagate` — the framework the problem is encoded into |
 | `filename` | auto | Relation-file path; relative paths resolve under `test/autoguess/files/` |
 | `name_prefix` | `None` | Prefix for the auto-generated filename |
 | `maxsteps` | `None` | Determination depth (auto = #variables) |
@@ -127,13 +166,23 @@ Both configs are plain dicts. An unrecognised key raises `ValueError` listing th
 
 | Key | Default | Description |
 |---|---|---|
-| `solver` | `"DEFAULT"` | Concrete backend. SAT uses `cadical153` without a limit and interruptible `glucose3` with a finite limit; SMT uses `z3`; CP uses `cp-sat`. Ignored (with a warning) for `milp` / `mark` / `elim` / `propagate`, which expose no backend choice |
+| `solver` | `"DEFAULT"` | Concrete backend. SAT uses `cadical153` without a limit and `glucose3` with a finite limit; MaxSAT uses `glucose3`; SMT uses `z3`; CP uses `cp-sat`. Ignored (with a warning) for `milp` / `mark` / `elim` / `propagate` |
 | `time_limit` | `-1` | One AutoGuess search budget in seconds, shared across optimization attempts; `-1` = unlimited, `0` = no search time. Positive fractions are accepted. Existing `timelimit` spelling is also accepted |
 | `threads` | `0` | `0` = auto |
 | `preprocess` | `0` | Macaulay preprocess |
+| `D` | `2` | Macaulay degree when preprocessing is enabled |
 | `milpdirection` | `"min"` | `min` or `max` |
 | `cpoptimization` | `1` | `1` = optimize, `0` = decision |
 | `dglayout` | `"dot"` | Determination-graph layout |
+| `graph_view` | `"original"` | Original AutoGuess topology or `"deduction"` layers |
+| `graph_scope` | `"targets"` | `"targets"` or `"full"` for the optional deduction view |
+| `seed_basis` | `None` | Fully paid starting guesses, using IDs from the cleaned relation model |
+| `seed_basis_file` | `None` | JSON ID list or a result containing `guessed_variable_ids` / `guessed_variables`; alternative to `seed_basis` |
+| `lower_bound` | `False` | Generate and independently verify a guess-cost lower-bound certificate |
+| `refine_basis` | `False` | Refine a paid seed for lower cost, then fewer propagation steps |
+| `refine_time` | automatic | Refinement phase cap inside the shared search budget |
+| `refine_trials` | `1000` | Maximum refinement trials |
+| `random_seed` | `0` | Seed for optional refinement |
 
 `findmin`, `maxguess`, `reducebasis`, `drawgraph`, `tikz` and `log` are **not** set
 here — they are derived from `objective_target`, `goal` and `show_mode`.
@@ -142,26 +191,37 @@ here — they are derived from `objective_target`, `goal` and `show_mode`.
 `timelimit` key remains supported; if both keys are supplied, their values must
 match. They configure one shared budget, not separate time limits.
 
-Solver picker (general guidance): `sat` for most problems; `cp` when SAT is too rigid; `propagate` for pure deduction without optimization; `mark` / `elim` for the marking and elimination algorithms; `milp` for weighted/optimization-shaped problems.
+MaxSAT uses PySAT's RC2 optimizer, included in the existing requirements.
+Paid seeds, lower bounds and refinement support SAT, MaxSAT, SMT, CP and
+minimizing MILP. Supply a paid seed when enabling refinement.
 
 ## Output files
 
-All artifacts land under `test/autoguess/files/` (gitignored). For `cipher.name="AES128"`, 3 modeling rounds:
+By default, artifacts land under `test/autoguess/files/` (gitignored).
+An absolute `config_model["filename"]` places the relations, report and graphs
+in that file's directory. For `cipher.name="AES128"`, 3 modeling rounds:
 
 | Artifact | Path |
 |---|---|
 | Dirty (uncleaned) relations | `test/autoguess/files/temp/dirty_relations_AES128_3r.txt` |
 | Cleaned relations (input to AutoGuess) | `test/autoguess/files/relations_AES128_3r.txt` |
 | Text report | `test/autoguess/files/output_AES128_3r` *(no extension)* |
-| Graphviz source | `test/autoguess/files/output_AES128_3r_graph` *(no extension)* |
+| Graphviz source | `test/autoguess/files/output_AES128_3r_graph.gv` |
 | Determination-flow PDF | `test/autoguess/files/output_AES128_3r_graph.pdf` |
+| Scalable SVG | `test/autoguess/files/output_AES128_3r_graph.svg` |
 | TikZ (only at `show_mode=3`) | `test/autoguess/files/output_AES128_3r_graph.tex` |
 | Solver intermediates (only at `show_mode>=2`) | `test/autoguess/files/temp/…` |
 
 Setting `config_model["name_prefix"]` inserts the prefix: `relations_<prefix>_AES128_3r.txt`.
 The output stem is derived from the relation filename by replacing `relations_` with `output_`.
 
-Graph node colors: blue = known, red = guessed, green = derived.
+Graphs include a legend: red targets, green paid guesses, blue known variables
+and grey derived variables. A guessed target has red fill and a green border.
+The default preserves the original AutoGuess deduction topology. The optional
+`graph_view="deduction"` shows synchronous deduction layers and AND junctions
+for jointly required premises. PDF, SVG and TikZ share the same deduction edges.
+`graph_files` lists only artifacts produced by the current run; format failures
+are reported through `graph_warnings`.
 
 ## Returned dict
 
@@ -175,6 +235,7 @@ Graph node colors: blue = known, red = guessed, green = derived.
     "time_limit":          30.0,
     "time_limit_seconds":  30.0,  # compatibility alias
     "targets_covered":     True,
+    "cost":                6,
     "outputfile":          "<absolute path or None>",
     "cipher":              <input cipher/function>,
     "known_variables":     [Variable, ...],
@@ -187,6 +248,7 @@ Graph node colors: blue = known, red = guessed, green = derived.
     "determination_steps": [{"step": 0, "determined_vars": [Variable, ...]}, ...],
     "relation_file":       "<absolute path>",
     "model_hash":          "<SHA-256 of the relation file>",
+    "graph_files":         {"gv": "..._graph.gv", "pdf": "..._graph.pdf", "svg": "..._graph.svg"},
 }
 ```
 
@@ -201,22 +263,28 @@ in the ID lists and `unresolved_variable_ids`. Single-function objects such as
 infeasibility or optimality. Check `status` before using a basis: `unknown`
 means that no complete validated basis was obtained.
 
+Optimization workflows also return `lower_bound`, `upper_bound`, `proof_method`,
+`proof_scope` and `propagation_steps`. Seeded runs include `seed_cost` and
+`seed_propagation_steps`, with refinement metadata when requested. A local
+improvement establishes feasibility; `optimal=True` requires a minimum-cost
+proof for the prepared model and selected depth.
+
 ## Time-limited optimization
 
 ```python
-result = attacks.guess_and_determine_attack(
+optimized = attacks.guess_and_determine_attack(
     cipher,
     known_vars=known_vars,
     objective_target="OPTIMAL",
-    config_model={"model_type": "sat", "maxsteps": 14},
+    config_model={"model_type": "sat", "skip_rounds": [2], "maxsteps": 14},
     config_solver={"time_limit": 30},
 )
-if result["status"] == "sat":
-    print("Guess cost:", result["cost"])
-    print("Proven minimum:", result["optimal"])
+if optimized["status"] == "sat":
+    print("Guess cost:", optimized["cost"])
+    print("Proven minimum:", optimized["optimal"])
 else:
-    print("No complete basis:", result["status"])
-print("Stopped because:", result["termination_reason"])
+    print("No complete basis:", optimized["status"])
+print("Stopped because:", optimized["termination_reason"])
 ```
 
 The default timed SAT backend is `glucose3`. A single deadline covers AutoGuess's
@@ -237,31 +305,48 @@ For direct relation-file searches, use `run_autoguess(..., time_limit=30)`.
 Its existing `timelimit` keyword also works. The standalone/vendored CLI keeps
 the upstream `--timelimit 30` and `-tl 30` options unchanged.
 
-Finite limits are supported by interruptible SAT backends, native CP and MILP,
+Finite limits are supported by interruptible SAT backends, MaxSAT, native CP and MILP,
 and SMT with `solver="z3"`. Other PySMT backends reject finite limits because
 their portable interface does not enforce them. Marking, elimination,
 propagation, and `REDUCEBASIS` also reject finite limits; use their unlimited
 default until they have an interruptible implementation.
 
-## Common patterns
+## Reuse and improve a paid basis
 
-**Key-schedule analysis (single function, custom name):**
+Reuse IDs from a successful result with the same relation model, knowledge and
+deduction depth. Keep `known_vars` for actual knowledge assumptions: a paid
+seed is supplied separately and retains its guess cost.
 
 ```python
-ks = cipher.functions["KEY_SCHEDULE"]
-result = attacks.guess_and_determine_attack(
-    ks,
-    target_vars=[ks.vars[r][0][j].ID for (r, j) in known_pairs],
-    objective_target="AT MOST 60",
-    config_model={
-        "model_type": "cp",
-        "name_prefix": "present_ks",
-        "sbox_form": "implication",
-        "maxsteps": 11,
-    },
-    config_solver={"preprocess": 1},
-)
+if result["status"] == "sat":
+    improved = attacks.guess_and_determine_attack(
+        cipher,
+        known_vars=known_vars,
+        objective_target="OPTIMAL",
+        config_model={"model_type": "maxsat", "skip_rounds": [2], "maxsteps": 14},
+        config_solver={
+            "time_limit": 30,
+            "seed_basis": result["guessed_variable_ids"],
+            "lower_bound": True,
+            "refine_basis": True,
+            "refine_time": 1,
+            "random_seed": 17,
+        },
+    )
+    print(improved["cost"], improved["optimal"])
 ```
+
+The supplied basis must cover every target within `maxsteps`, fit the cost cap
+and obey forbidden-guess restrictions. Previous IDs apply to the same cleaned
+model; changing relation-generation options can change their meaning. A
+validated seed remains available if optimization times out. Propagation steps
+are deduction layers, not cipher rounds or measured attack runtime.
+
+## Common patterns
+
+For key-schedule analysis, pass `cipher.functions["KEY_SCHEDULE"]` as the
+first argument and supply its variable IDs through the usual known, target
+and forbidden-guess roles.
 
 **Skip rounds / focus on the non-linear core:**
 
@@ -323,100 +408,60 @@ from tools.autoguess_wrapper   import run_autoguess
 
 ## Sage-free support
 
-Normal SAT search does not require SageMath. Boolean Macaulay preprocessing
-(`preprocess=1`) uses exact polynomial arithmetic over GF(2), with `x*x=x`, and
-packed GF(2) Gaussian elimination in Python/NumPy/Numba. The regression suite
-checks independent truth tables and elimination, and reproduces the paper's
-Section 5.1 example: 3 guesses without preprocessing, 2 at degree 2, and 1 at
-degree 3. This validates that example and the tested algebra, not every attack
-or every Sage feature.
+Boolean Macaulay preprocessing (`preprocess=1`, `D=2`) runs without SageMath
+using exact Boolean arithmetic over GF(2), with `x*x=x`. Increase `D` to try
+a higher preprocessing degree. The separate Gröbner-basis backend is unavailable.
 
-The separate Gröbner-basis search backend is unavailable and fails explicitly.
-Boolean nonlinear preprocessing does not provide general polynomial arithmetic
-over GF(2^n). Binary matrix equations are supported; requesting the binary
-algebraic option for AES's nonbinary MixColumns coefficients raises an error.
-The ordinary AES matrix connection model handles those field coefficients.
+Binary algebraic matrix equations are supported; general GF(2^n) polynomial
+arithmetic is not. Use the ordinary AES matrix connection model for its
+nonbinary MixColumns coefficients. Unsupported operators raise an error.
+Explicitly skipping operations changes the relation model being searched.
 
-`requirements-autoguess.txt` records the Python package versions used for the
-Sage-free SAT and algebra regression checks. CP additionally needs the MiniZinc
-Python package, a MiniZinc binary, and a backend solver; SMT needs PySMT and its
-selected backend; MILP needs Gurobi and a suitable license. Graph rendering
-needs the Graphviz executable as well as its Python package.
+Connection models can collapse bijections as knowledge equivalents. Algebraic
+models retain distinct values across nonlinear S-boxes, word rotations and
+nonzero constants.
 
-Run the focused regressions with:
+## Tests (optional)
+
+Install pytest separately from the runtime requirements. SAT, relation-generation
+and Boolean-algebra checks:
 
 ```sh
-env312/bin/python -m pytest -q test/autoguess/test_integration_regressions.py test/autoguess/test_solver_regressions.py test/autoguess/test_relation_regressions.py test/autoguess/test_sage_free_algebra.py
+python -m pip install pytest==9.0.3
+python -m pytest -q test/autoguess/test_integration_regressions.py test/autoguess/test_relation_regressions.py test/autoguess/test_sage_free_algebra.py
 ```
 
-Optional native CP/SMT checks use the versions recorded in
-`requirements-autoguess-native.txt`:
+For the complete suite, install the optional CP, SMT and MILP packages listed
+under Installation and configure their native backends:
 
 ```sh
-env312/bin/python -m pip install -r requirements-autoguess-native.txt
-env312/bin/python -m pytest -q test/autoguess/test_native_cp.py test/autoguess/test_native_smt.py
+python -m pytest -q test/autoguess
 ```
 
-The CP tests run actual CP-SAT, Gecode, and Chuffed processes when available;
-the SMT tests run PySMT/Z3 and the direct Z3 backend. They compare finite-depth
-answers and weighted costs with SAT and independent exhaustive enumeration.
-Missing optional dependencies cause skips, so inspect the test summary.
+The native checks use installed solver backends; some backend-specific cases
+skip when unavailable. Sage comparisons use a separate optional environment.
 
-The direct Sage-library reference uses a separate environment:
+<details>
+<summary>Optional Sage-library comparison</summary>
+
+These reference packages are for tests only. Keep them in a separate environment:
 
 ```sh
-env312/bin/python -m venv files/native-sage-env
-files/native-sage-env/bin/python -m pip install -r requirements-autoguess-sage-oracle.txt
-env312/bin/python -m pytest -q test/autoguess/test_native_sage.py
+python3.12 -m venv files/native-sage-env
+files/native-sage-env/bin/python -m pip install passagemath-brial==10.8.13 'passagemath-modules[gf2]==10.8.13'
+python -m pytest -q test/autoguess/test_native_sage.py
 ```
 
-This installs compiled Sage mathematical libraries distributed by PassageMath,
-a SageMath fork, rather than the full upstream Sage application. The oracle
-runs those native libraries in a separate process and does not import OCP.
-The tests also accept a full Sage installation through
-`OCP_SAGE_COMMAND="sage -python"`, or a Sage-capable Python through
-`OCP_SAGE_PYTHON`. OCP's normal
-runtime remains independent of these reference packages.
+This uses compiled Sage libraries distributed by PassageMath. An existing Sage
+installation can be selected with `OCP_SAGE_COMMAND="sage -python"` or
+`OCP_SAGE_PYTHON=/path/to/python`.
 
-The native reference matched 169 polynomial pairs, both monomial orders,
-27 GF(2) matrices, and 98 Macaulay systems. A further 24 comparisons run the
-original upstream AutoGuess mathematical methods at commit
-`9ea002f14838bc43a0dcbea8fe2ae44074c09858`, with an explicit shared variable order
-and native imports replacing its broad `sage.all` import. Its symbolic input
-parser is bypassed; lifting, matrix construction, elimination, and basis writing
-run unchanged. The full Sage application and its separate Gröbner backend are
-outside these comparisons.
-
-To enable those upstream-source cases on another checkout, download the pinned
-source before running `test_native_sage.py` (otherwise that one test skips):
+To include comparisons with the pinned upstream mathematical methods, download
+their source before running the Sage tests; that case skips when the file is absent:
 
 ```sh
 mkdir -p files/autoguess-native-validation-2026-10-15
 curl --fail --location https://raw.githubusercontent.com/hadipourh/autoguess/9ea002f14838bc43a0dcbea8fe2ae44074c09858/core/macaulay.py --output files/autoguess-native-validation-2026-10-15/upstream_macaulay.py
 ```
 
-## Notes / gotchas
-
-- The Groebner-basis solver is **not** available in this no-Sage variant. Use the upstream AutoGuess if you need it.
-- Unsupported operators now raise an error instead of disappearing from the
-  model. Use an explicit skip option only when the resulting abstraction is
-  intentional. SKINNY TK2/TK3 tweakey LFSRs are modeled.
-- Bijective transformations may be collapsed as knowledge equivalents in a
-  connection model. Algebraic models retain distinct values across nonlinear
-  S-boxes, word rotations, and nonzero constants.
-- `AT MOST X` finds a feasible basis and does not promise the smallest one.
-  `REDUCEBASIS` finds a smallest subset of the supplied basis; it does not search
-  for every possible replacement basis. In this mode `known_vars` means
-  removable guesses. Low-level relation files can separately supply fixed knowns.
-- Finite SAT time limits select `glucose3` when `config_solver["solver"]` is
-  `"DEFAULT"`. Explicitly selected unsupported backends, including CaDiCaL,
-  reject the request rather than ignoring the limit. A timed-out optimization
-  returns the best validated complete basis with `optimal=False`, or `unknown`
-  if none was found. See the time-limited optimization example above.
-- The PRESENT example uses 11 steps: replaying its saved 60-guess basis under
-  corrected value-preserving algebraic modeling covers 94/96 targets at step
-  10 and all 96 at step 11. The guess count remains feasible; the old depth
-  claim does not hold for that saved basis under the corrected model.
-- If `target_vars` is set and `not_guessed_vars` doesn't already exclude them, the first target is auto-protected so the trivial all-targets-guessed solution can't win. Set `protect_all_targets=True` to protect every target (key-recovery mode).
-- Relative paths in `config_model["filename"]` are resolved against `test/autoguess/files/`.
-- The relation file is named from the cipher and modelling options only, not from `goal` or `objective_target` — runs that differ only in objective deliberately reuse it.
+</details>

@@ -21,6 +21,7 @@ In case you use this tool please include the above copyright informations (name,
 
 import time
 from datetime import datetime
+from core.console import progress
 from core.inputparser import read_relation_file
 
 
@@ -44,23 +45,23 @@ def propagate_knowledge(parsed_data, known_variables):
     # Validate input
     for var in known_variables:
         if var not in all_variables:
-            print("Error: variable '%s' not found in the parsed data." % var)
+            progress("Error: variable '%s' not found in the parsed data." % var)
             return None
 
     start_time = time.time()
     separator = '=' * 60
 
-    print(separator)
-    print('Knowledge propagation started - %s' % datetime.now())
+    progress(separator)
+    progress('Knowledge propagation started - %s' % datetime.now())
     if problem_name:
-        print('Problem: %s' % problem_name)
-    print('Total variables: %d' % len(all_variables))
-    print('Total relations: %d (symmetric: %d, implication: %d)' % (
+        progress('Problem: %s' % problem_name)
+    progress('Total variables: %d' % len(all_variables))
+    progress('Total relations: %d (symmetric: %d, implication: %d)' % (
         len(symmetric_relations) + len(implication_relations),
         len(symmetric_relations), len(implication_relations)))
-    print('Initially known variables: %d' % len(known_variables))
-    print('  %s' % ', '.join(known_variables))
-    print(separator)
+    progress('Initially known variables: %d' % len(known_variables))
+    progress('  %s' % ', '.join(known_variables))
+    progress(separator)
 
     known_set = set(known_variables)
     iteration = 0
@@ -125,9 +126,9 @@ def propagate_knowledge(parsed_data, known_variables):
                 seen.add(var)
                 unique_learned.append((var, rel))
 
-        print('\nIteration %d: learned %d new variable(s)' % (iteration, len(unique_learned)))
+        progress('\nIteration %d: learned %d new variable(s)' % (iteration, len(unique_learned)))
         for var, rel in unique_learned:
-            print('  %s  <--  [%s]' % (var, ', '.join(rel)))
+            progress('  %s  <--  [%s]' % (var, ', '.join(rel)))
 
         known_set.update(seen)
         frontier = seen  # next iteration only re-checks relations touching new vars
@@ -140,19 +141,19 @@ def propagate_knowledge(parsed_data, known_variables):
     unreachable = [v for v in all_variables if v not in known_set]
     targets_covered = [v for v in target_variables if v in known_set]
 
-    print('\n' + separator)
-    print('PROPAGATION SUMMARY')
-    print(separator)
-    print('Total iterations:          %d' % iteration)
-    print('Initially known:           %d' % initially_known_count)
-    print('Newly learned:             %d' % newly_learned_count)
-    print('Total known after prop.:   %d / %d' % (len(known_set), len(all_variables)))
-    print('Unreachable variables:     %d' % len(unreachable))
+    progress('\n' + separator)
+    progress('PROPAGATION SUMMARY')
+    progress(separator)
+    progress('Total iterations:          %d' % iteration)
+    progress('Initially known:           %d' % initially_known_count)
+    progress('Newly learned:             %d' % newly_learned_count)
+    progress('Total known after prop.:   %d / %d' % (len(known_set), len(all_variables)))
+    progress('Unreachable variables:     %d' % len(unreachable))
     if unreachable:
-        print('  %s' % ', '.join(unreachable))
-    print('Target variables covered:  %d / %d' % (len(targets_covered), len(target_variables)))
-    print('Elapsed time:              %.4f seconds' % elapsed)
-    print(separator)
+        progress('  %s' % ', '.join(unreachable))
+    progress('Target variables covered:  %d / %d' % (len(targets_covered), len(target_variables)))
+    progress('Elapsed time:              %.4f seconds' % elapsed)
+    progress(separator)
 
     return known_set
 
@@ -249,36 +250,36 @@ def reduce_basis(parsed_data, basis_variables, max_steps=None):
     # Validate
     for var in basis_variables:
         if var not in all_variables:
-            print("Error: variable '%s' not found in the parsed data." % var)
+            progress("Error: variable '%s' not found in the parsed data." % var)
             return None
 
     start_time = time.time()
     separator = '=' * 60
 
-    print(separator)
-    print('BASIS REDUCTION via propagation — %s' % datetime.now())
+    progress(separator)
+    progress('BASIS REDUCTION via propagation — %s' % datetime.now())
     if problem_name:
-        print('Problem: %s' % problem_name)
-    print('Total variables: %d' % len(all_variables))
-    print('Total relations: %d (symmetric: %d, implication: %d)' % (
+        progress('Problem: %s' % problem_name)
+    progress('Total variables: %d' % len(all_variables))
+    progress('Total relations: %d (symmetric: %d, implication: %d)' % (
         len(symmetric_relations) + len(implication_relations),
         len(symmetric_relations), len(implication_relations)))
-    print('Target variables: %d' % len(target_variables))
+    progress('Target variables: %d' % len(target_variables))
     if fixed_known:
-        print('Fixed known (from file): %d  (%s)' % (len(fixed_known), ', '.join(fixed_known)))
-    print('Initial basis to reduce (%d): %s' % (len(basis_variables), ', '.join(basis_variables)))
-    print(separator)
+        progress('Fixed known (from file): %d  (%s)' % (len(fixed_known), ', '.join(fixed_known)))
+    progress('Initial basis to reduce (%d): %s' % (len(basis_variables), ', '.join(basis_variables)))
+    progress(separator)
 
     # First verify the full basis is indeed a guess basis
     full_known = closure(fixed_known + basis_variables)
     if not target_set.issubset(full_known):
         uncovered = sorted(target_set - full_known)
-        print('\nERROR: The supplied basis is NOT a valid guess basis!')
-        print('  Uncovered targets (%d): %s' % (len(uncovered), ', '.join(uncovered)))
-        print(separator)
+        progress('\nERROR: The supplied basis is NOT a valid guess basis!')
+        progress('  Uncovered targets (%d): %s' % (len(uncovered), ', '.join(uncovered)))
+        progress(separator)
         return None
 
-    print('\nFull basis (%d vars) verified — all targets covered.' % len(basis_variables))
+    progress('\nFull basis (%d vars) verified — all targets covered.' % len(basis_variables))
 
     n = len(basis_variables)
     best_basis = list(basis_variables)
@@ -287,7 +288,7 @@ def reduce_basis(parsed_data, basis_variables, max_steps=None):
     for drop in range(1, n + 1):
         subset_size = n - drop
         n_subsets = comb(n, subset_size)
-        print('\n--- Trying subsets of size %d  (%d candidates) ---' % (subset_size, n_subsets))
+        progress('\n--- Trying subsets of size %d  (%d candidates) ---' % (subset_size, n_subsets))
 
         found_at_level = None          # first valid candidate at this level
         for idx, subset in enumerate(combinations(basis_variables, subset_size), 1):
@@ -295,41 +296,41 @@ def reduce_basis(parsed_data, basis_variables, max_steps=None):
             candidate = list(subset)
             known_after = closure(fixed_known + candidate)
             if target_set.issubset(known_after):
-                print('  [%d/%d] {%s}  =>  VALID guess basis!' % (idx, n_subsets, ', '.join(candidate)))
+                progress('  [%d/%d] {%s}  =>  VALID guess basis!' % (idx, n_subsets, ', '.join(candidate)))
                 if found_at_level is None:
                     found_at_level = candidate   # keep the first valid one
                 break                            # no need to check remaining subsets at this level
             else:
                 if idx <= 20 or idx == n_subsets:
                     uncov = len(target_set - known_after)
-                    print('  [%d/%d] {%s}  =>  %d target(s) uncovered' % (idx, n_subsets, ', '.join(candidate), uncov))
+                    progress('  [%d/%d] {%s}  =>  %d target(s) uncovered' % (idx, n_subsets, ', '.join(candidate), uncov))
                 elif idx == 21:
-                    print('  ... (suppressing further output for this level) ...')
+                    progress('  ... (suppressing further output for this level) ...')
 
         if found_at_level is not None:
             best_basis = found_at_level
-            print('  ==> Size %d is feasible — continuing to smaller sizes ...' % subset_size)
+            progress('  ==> Size %d is feasible — continuing to smaller sizes ...' % subset_size)
         else:
             # No valid subset at this level — stop and return the best we found
-            print('  ==> No valid guess basis of size %d.' % subset_size)
+            progress('  ==> No valid guess basis of size %d.' % subset_size)
             break
 
     elapsed = time.time() - start_time
-    print('\n' + separator)
-    print('REDUCTION RESULT')
-    print(separator)
+    progress('\n' + separator)
+    progress('REDUCTION RESULT')
+    progress(separator)
     if len(best_basis) < n:
-        print('Original basis size:   %d' % n)
-        print('Reduced basis size:    %d  (dropped %d)' % (len(best_basis), n - len(best_basis)))
-        print('Reduced basis:         %s' % ', '.join(best_basis))
+        progress('Original basis size:   %d' % n)
+        progress('Reduced basis size:    %d  (dropped %d)' % (len(best_basis), n - len(best_basis)))
+        progress('Reduced basis:         %s' % ', '.join(best_basis))
         dropped = sorted(set(basis_variables) - set(best_basis))
-        print('Dropped variable(s):   %s' % ', '.join(dropped))
+        progress('Dropped variable(s):   %s' % ', '.join(dropped))
     else:
-        print('No smaller guess basis found via propagation.')
-        print('The original basis of size %d is minimal (w.r.t. propagation).' % n)
-    print('Subsets tested:        %d' % total_checked)
-    print('Elapsed time:          %.4f seconds' % elapsed)
-    print(separator)
+        progress('No smaller guess basis found via propagation.')
+        progress('The original basis of size %d is minimal (w.r.t. propagation).' % n)
+    progress('Subsets tested:        %d' % total_checked)
+    progress('Elapsed time:          %.4f seconds' % elapsed)
+    progress(separator)
     return best_basis
 
 
@@ -337,4 +338,4 @@ if __name__ == '__main__':
     relation_file = "relationfile.txt"
     parsed_data = read_relation_file(relation_file, preprocess=0, D=2, log=0)
     learned_variables = propagate_knowledge(parsed_data=parsed_data, known_variables=["x0", "x1"])
-    print("Learned variables:", learned_variables)
+    progress("Learned variables:", learned_variables)

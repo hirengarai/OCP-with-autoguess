@@ -20,20 +20,16 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 In case you use this tool please include the above copyright informations (name, contact, license)
 """
 
-from logging import root
 import os
 import time
 from pysat import solvers
 from pysat import formula
-from pysat import card
 from pysat import pb
-from aiger import and_gate, or_gate
 import random
 from core.inputparser import read_relation_file
-from threading import Timer
 from core.parsesolution import parse_solver_solution
-from core.graphdrawer import draw_graph
 from config import TEMP_DIR
+from core.console import progress
 from core.varnames import step_var, path_var
 from core.solverresult import solve_sat
 
@@ -68,6 +64,10 @@ class ReduceGDtoSAT:
         drawgraph=True,
         log=0,
         extra_known=None,
+        prepared_data=None,
+        graph_scope="targets",
+        graph_view="original",
+        defer_reporting=False,
     ):
         ReduceGDtoSAT.count += 1
         self.inputfile_name = inputfile_name
@@ -77,6 +77,9 @@ class ReduceGDtoSAT:
         self.max_steps = max_steps
         self.sat_solver_name = sat_solver
         self.draw_graph = drawgraph
+        self.graph_scope = graph_scope
+        self.graph_view = graph_view
+        self.defer_reporting = defer_reporting
         self.supported_sat_solvers = [
             solver
             for solver in solvers.SolverNames.__dict__.keys()
@@ -88,13 +91,15 @@ class ReduceGDtoSAT:
         self.log = log
         ###############################
         # Read and parse the input file
-        parsed_data = read_relation_file(
-            self.inputfile_name,
-            preprocess=preprocess,
-            D=D,
-            log=self.log,
-            extra_known=extra_known,
-        )
+        parsed_data = prepared_data
+        if parsed_data is None:
+            parsed_data = read_relation_file(
+                self.inputfile_name,
+                preprocess=preprocess,
+                D=D,
+                log=self.log,
+                extra_known=extra_known,
+            )
         self.problem_name = parsed_data["problem_name"]
         self.variables = parsed_data["variables"]
         self.known_variables = parsed_data["known_variables"]
@@ -345,17 +350,17 @@ class ReduceGDtoSAT:
         This method makes the SAT model and then write it into a CNF file in DIMACS format
         """
 
-        print("=" * 60)
-        print("SAT SOLVER — %s" % self.problem_name)
-        print("=" * 60)
-        print(
+        progress("=" * 60)
+        progress("SAT SOLVER — %s" % self.problem_name)
+        progress("=" * 60)
+        progress(
             "Variables: %d | Relations: %d" % (self.num_of_vars, self.num_of_relations)
         )
-        print("Max guess: %d | Max steps: %d" % (self.max_guess, self.max_steps))
-        print("Solver: %s" % self.sat_solver_name)
-        print("-" * 60)
-        print("MODEL GENERATION")
-        print("-" * 60)
+        progress("Max guess: %d | Max steps: %d" % (self.max_guess, self.max_steps))
+        progress("Solver: %s" % self.sat_solver_name)
+        progress("-" * 60)
+        progress("MODEL GENERATION")
+        progress("-" * 60)
         start_time = time.time()
         self.generate_sat_constraints()
         self.generate_boundary_conditions()
@@ -367,10 +372,10 @@ class ReduceGDtoSAT:
         elapsed_time = time.time() - start_time
         if self.log == 1:
             self.cnf_formula.to_file(self.cnf_file_path)
-            print("SAT model generated in %0.2f seconds" % elapsed_time)
-            print("Written to: %s" % self.cnf_file_path)
+            progress("SAT model generated in %0.2f seconds" % elapsed_time)
+            progress("Written to: %s" % self.cnf_file_path)
         else:
-            print("SAT model generated in %0.2f seconds" % elapsed_time)
+            progress("SAT model generated in %0.2f seconds" % elapsed_time)
 
     def interrupt(self, s):
         s.interrupt()
@@ -387,14 +392,14 @@ class ReduceGDtoSAT:
         if self.sat_solver_name in solvers.SolverNames.__dict__.keys():
             sat_solver = solvers.Solver(name=self.sat_solver_name)
         else:
-            print(
+            progress(
                 "Choose a solver from the following list please: %s"
                 % ", ".join(self.supported_sat_solvers)
             )
             return
-        print("-" * 60)
-        print("SOLVING")
-        print("-" * 60)
+        progress("-" * 60)
+        progress("SOLVING")
+        progress("-" * 60)
         start_time = time.time()
         try:
             sat_solver.append_formula(self.cnf_formula)
@@ -406,7 +411,7 @@ class ReduceGDtoSAT:
         finally:
             sat_solver.delete()
         elapsed_time = time.time() - start_time
-        print("Solving finished in %0.2f seconds" % elapsed_time)
+        progress("Solving finished in %0.2f seconds" % elapsed_time)
         if result == True:
             self.termination_reason = "solution_found"
             positive = set(literal for literal in self.satsolver_solution if literal > 0)
@@ -423,30 +428,20 @@ class ReduceGDtoSAT:
                 )
                 self.solutions[step] = dict(zip(state_vars, state_values))
             parse_solver_solution(self)
-            if self.draw_graph:
-                draw_graph(
-                    self.vertices,
-                    self.edges,
-                    self.known_variables,
-                    self.guessed_vars,
-                    self.output_dir,
-                    self.tikz,
-                    self.dglayout,
-                )
             return True
         elif result == False:
             self.termination_reason = "infeasible"
-            print("\n" + "=" * 60)
-            print("RESULT: UNSATISFIABLE")
-            print("The problem is UNSAT!")
-            print("Increase max_guess or max_steps and try again.")
-            print("=" * 60)
+            progress("\n" + "=" * 60)
+            progress("RESULT: UNSATISFIABLE")
+            progress("The problem is UNSAT!")
+            progress("Increase max_guess or max_steps and try again.")
+            progress("=" * 60)
             return False
         else:
             self.timed_out = self.time_limit != -1
             self.termination_reason = "time_limit" if self.timed_out else "unknown"
-            print("\n" + "=" * 60)
-            print("RESULT: %s" % self.termination_reason.upper())
-            print("The solver stopped before finding any solution.")
-            print("=" * 60)
+            progress("\n" + "=" * 60)
+            progress("RESULT: %s" % self.termination_reason.upper())
+            progress("The solver stopped before finding any solution.")
+            progress("=" * 60)
             return None

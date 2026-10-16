@@ -1,7 +1,6 @@
-# Versions validated with Python 3.12.13 for Sage-free SAT and algebra tests.
+# Runtime dependencies for OCP's Sage-free AutoGuess integration (Python 3.12).
 python-sat[pblib]==1.9.dev2
 numpy==2.4.4
 numba==0.65.1
 graphviz==0.21
 dot2tex==2.11.3
-pytest==9.0.3

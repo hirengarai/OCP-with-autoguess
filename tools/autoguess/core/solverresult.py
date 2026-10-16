@@ -180,6 +180,10 @@ def current_result(solver, status, optimal=False):
     lower_bound = getattr(solver, "lower_bound", None)
     if lower_bound is not None and math.isfinite(lower_bound):
         result["lower_bound"] = lower_bound
+    for key in ("graph_files", "graph_summary", "graph_warnings"):
+        value = getattr(solver, "_" + key, None)
+        if value is not None:
+            result[key] = value
     return termination_result(result, reason)
 
 

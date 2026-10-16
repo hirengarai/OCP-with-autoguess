@@ -310,7 +310,10 @@ def test_milp_native_stop_status_keeps_valid_incumbent(tmp_path, monkeypatch, ha
         optimize=lambda: None, dispose=lambda: None,
         getVarByName=lambda name: SimpleNamespace(X=assignment[name], Xn=assignment[name]),
     )
-    monkeypatch.setattr(milp, "read", lambda path: model)
+    # Per-run environments control solver logging without changing global
+    # Gurobi state; this status simulation must not acquire a real license.
+    monkeypatch.setattr(milp, "Env", lambda **kwargs: SimpleNamespace(dispose=lambda: None))
+    monkeypatch.setattr(milp, "read", lambda path, env: model)
     source = source_file(tmp_path)
     result = search(tmp_path, source, solver="milp", timelimit=10)
     assert_metadata(result, reason="time_limit" if stop_reason == "TIME_LIMIT" else "interrupted",
@@ -363,14 +366,15 @@ def test_cli_accepts_fractional_budget_and_prints_stopping_reason(tmp_path, limi
          "-o", str(report), "-mg", "1", "-ms", "1", "-tl", limit, "--nograph"],
         cwd=tmp_path, capture_output=True, text=True, timeout=15,
     )
-    assert completed.returncode == 0, completed.stderr
-    assert "Solver: glucose3" in completed.stdout
+    assert completed.returncode == (3 if limit == "0" else 0), completed.stderr
     assert "Elapsed:" in completed.stdout
     if limit == "0":
         assert "Termination: time_limit" in completed.stdout
-        assert "no complete basis was found (status: unknown)" in completed.stdout
+        assert "STATUS: UNKNOWN" in completed.stdout
+        assert "Guessed variables:" not in completed.stdout
         assert report.read_text() == "old successful report"
     else:
+        assert "STATUS: SAT" in completed.stdout
         assert "Termination: solution_found" in completed.stdout
         assert "Number of guessed variables: 1" in report.read_text()
         assert "old successful report" not in report.read_text()

@@ -20,6 +20,9 @@ Results come directly from the solver, never from a previously written report.
 """
 
 import functools
+from contextlib import nullcontext
+import json
+import math
 import os
 import sys
 import threading
@@ -28,6 +31,107 @@ from pathlib import Path
 # Path to the autoguess directory inside OCP
 _AUTOGUESS_DIR = Path(__file__).resolve().parent / "autoguess"
 _AUTOGUESS_LOCK = threading.RLock()
+
+
+def _read_paid_seed(filename):
+    with open(filename) as stream:
+        seed = json.load(stream)
+    if isinstance(seed, dict):
+        seed = seed.get("guessed_variable_ids", seed.get("guessed_variables"))
+    if not isinstance(seed, list) or any(not isinstance(v, str) for v in seed):
+        raise ValueError("Seed JSON must contain a variable ID list or guessed_variables/guessed_variable_ids")
+    return seed
+
+
+def _validate_solver_options(options):
+    """Reject incompatible options before generating relations or reports."""
+    solver = options.get("solver", "sat")
+    if solver not in {"sat", "maxsat", "smt", "cp", "milp", "mark", "elim", "propagate"}:
+        raise ValueError("Unsupported AutoGuess solver: %s" % solver)
+    time_limit = options.get("time_limit")
+    if time_limit is None:
+        time_limit = options.get("timelimit", -1)
+    if isinstance(time_limit, bool) or not isinstance(time_limit, (int, float)) or not math.isfinite(time_limit) or time_limit < 0 and time_limit != -1:
+        raise ValueError("Time limit must be nonnegative or -1 (finite numeric values only)")
+    degree = options.get("D", 2)
+    if isinstance(degree, bool) or not isinstance(degree, int) or degree < 0:
+        raise ValueError("D must be a nonnegative integer")
+    for key in ("lower_bound", "refine_basis"):
+        if not isinstance(options.get(key, False), bool):
+            raise ValueError(key + " must be a boolean")
+    seed, seed_file = options.get("seed_basis"), options.get("seed_basis_file")
+    if seed is not None and seed_file is not None:
+        raise ValueError("Use either seed_basis or seed_basis_file")
+    if seed is not None and (not isinstance(seed, (str, list, tuple)) or
+                            isinstance(seed, (list, tuple)) and any(not isinstance(v, str) for v in seed)):
+        raise ValueError("seed_basis must contain variable ID strings")
+    if seed_file is not None and not isinstance(seed_file, (str, os.PathLike)):
+        raise ValueError("seed_basis_file must be a path")
+    if seed_file is not None:
+        protected = {Path(options[key]).expanduser().resolve() for key in ("inputfile", "outputfile")
+                     if options.get(key) is not None}
+        if Path(seed_file).expanduser().resolve() in protected:
+            raise ValueError("The paid seed input must differ from the relation input and report paths")
+        _read_paid_seed(Path(seed_file).expanduser())
+    if options.get("refine_basis") and seed is None and seed_file is None:
+        raise ValueError("refine_basis requires a fully paid seed_basis or seed_basis_file")
+    local_limit = options.get("refine_time")
+    if local_limit is not None:
+        if not options.get("refine_basis"):
+            raise ValueError("refine_time requires refine_basis")
+        if isinstance(local_limit, bool) or not isinstance(local_limit, (int, float)) or not math.isfinite(local_limit) or local_limit < 0:
+            raise ValueError("refine_time must be finite and nonnegative")
+    trials = options.get("refine_trials", 1000)
+    if isinstance(trials, bool) or not isinstance(trials, int) or trials < 0:
+        raise ValueError("refine_trials must be a nonnegative integer")
+    random_seed = options.get("random_seed", 0)
+    if isinstance(random_seed, bool) or not isinstance(random_seed, int):
+        raise ValueError("random_seed must be an integer")
+    advanced = (solver == "maxsat" or seed is not None or seed_file is not None or
+                options.get("lower_bound") or options.get("refine_basis"))
+    if advanced and options.get("reducebasis"):
+        raise ValueError("REDUCEBASIS cannot be combined with paid-seed optimization options")
+    if advanced and solver not in {"sat", "maxsat", "smt", "cp", "milp"}:
+        raise ValueError("Paid seeds, bounds and refinement require SAT, MaxSAT, SMT, CP or MILP")
+    if solver == "milp" and (advanced or options.get("findmin")) and options.get("milpdirection", "min") != "min":
+        raise ValueError("Optimization options require MILP minimization")
+    if solver == "cp" and options.get("findmin") and options.get("cpoptimization", 1) != 1:
+        raise ValueError("OPTIMAL with CP requires cpoptimization=1")
+    if solver == "maxsat" and options.get("satsolver") not in (None, "g3", "glucose3"):
+        raise ValueError("MaxSAT requires the g3/glucose3 SAT backend")
+    if options.get("term_ordering", "degrevlex") != "degrevlex":
+        raise ValueError("Relation preprocessing supports only term_ordering='degrevlex'")
+    if options.get("graph_view", "original") not in {"original", "deduction"}:
+        raise ValueError("graph_view must be original or deduction")
+    if options.get("graph_scope", "targets") not in {"targets", "full"}:
+        raise ValueError("graph_scope must be targets or full")
+
+
+def _print_result_summary(result):
+    """Print one OCP result summary using stable IDs, before object mapping."""
+    print("STATUS: %s" % result["status"].upper())
+    print("Termination: %s" % result.get("termination_reason", "unknown"))
+    if "elapsed_seconds" in result:
+        print("Elapsed: %.3f seconds" % result["elapsed_seconds"])
+    print("Targets covered: %d / %d" % (len(result.get("covered_target_variables", [])),
+                                          len(result.get("target_variables", []))))
+    if result.get("cost") is not None:
+        print("Guess cost: %s" % result["cost"])
+    print("Known variables: %s" % (", ".join(result.get("known_variables", [])) or "(none)"))
+    print("Guessed variables: %s" % (", ".join(result.get("guessed_variables", [])) or "(none)"))
+    if "lower_bound" in result:
+        upper = result.get("upper_bound", result.get("cost"))
+        print("Cost bounds: %s .. %s" % (result["lower_bound"], upper if upper is not None else "unknown"))
+    if result.get("propagation_steps") is not None:
+        print("Target propagation steps: %s" % result["propagation_steps"])
+    print("Optimal: %s" % ("yes" if result.get("optimal") else "not established"))
+    if result.get("timed_out"):
+        print("Time limit reached; returning the best validated basis found." if result["status"] == "sat"
+              else "Time limit reached; no complete basis was found (status: unknown).")
+    if result.get("outputfile"):
+        print("Current report: %s" % result["outputfile"])
+    for kind, path in result.get("graph_files", {}).items():
+        print("Current graph (%s): %s" % (kind.upper(), path))
 
 
 def _with_autoguess_path(func):
@@ -191,6 +295,18 @@ def run_autoguess(
     overlapping_number=2,
     cnf_to_anf_conversion="simple",
     time_limit=None,
+    seed_basis=None,
+    seed_basis_file=None,
+    lower_bound=False,
+    refine_basis=False,
+    refine_time=None,
+    refine_trials=1000,
+    random_seed=0,
+    graph_view="original",
+    graph_scope="targets",
+    verbose=None,
+    print_result=False,
+    relation_metadata=None,
 ):
     """
     Run AutoGuess on a relation file.
@@ -205,7 +321,7 @@ def run_autoguess(
         variable IDs in the output back to Variable objects.
 
     solver : str
-        One of: 'sat', 'milp', 'smt', 'cp', 'mark', 'elim', 'propagate'.
+        One of: 'sat', 'maxsat', 'milp', 'smt', 'cp', 'mark', 'elim', 'propagate'.
 
     maxguess : int, optional
         Upper bound on guessed variables. Auto-computed if None.
@@ -234,6 +350,21 @@ def run_autoguess(
 
     known : list of str, optional
         Extra known variables.
+
+    seed_basis : list of str, optional
+        Fully paid starting guesses, distinct from fixed ``known`` variables.
+        Use IDs in the cleaned relation file, such as a previous OCP result's
+        ``guessed_variable_ids``. ``seed_basis_file`` also accepts a JSON list
+        or a standalone result containing ``guessed_variables`` IDs, or a saved
+        OCP result containing ``guessed_variable_ids``.
+
+    lower_bound, refine_basis : bool
+        Verify a formal lower-bound certificate, or refine the paid seed.
+        Refinement and native solving share the request's time budget.
+
+    verbose : bool, optional
+        Scope native progress output; None preserves direct API verbosity.
+        ``print_result`` requests one final summary with original IDs.
 
     drawgraph : bool
         Generate determination flow graph.
@@ -272,22 +403,38 @@ def run_autoguess(
         else:
             time_options["time_limit"] = time_limit
     time_limit = get_time_limit(time_options)
+    _validate_solver_options(locals())
+    if verbose is not None and not isinstance(verbose, bool):
+        raise ValueError("verbose must be a boolean or None")
+    if not isinstance(print_result, bool):
+        raise ValueError("print_result must be a boolean")
+
+    input_path = str(Path(inputfile).expanduser().resolve())
+    output_path = str(Path(outputfile).expanduser().resolve())
+    if input_path == output_path:
+        raise ValueError("The text report must differ from the input file")
+    if seed_basis_file is not None:
+        seed_basis_file = str(Path(seed_basis_file).expanduser().resolve())
+        if seed_basis_file in {input_path, output_path}:
+            raise ValueError("The paid seed input must differ from the relation input and report paths")
 
     # Build params dict
     params = _default_params()
     params.update(
         {
-            "inputfile": str(Path(inputfile).expanduser().resolve()),
-            "outputfile": str(Path(outputfile).expanduser().resolve()),
+            "inputfile": input_path,
+            "outputfile": output_path,
             "solver": solver,
             "maxguess": maxguess,
             "maxsteps": maxsteps,
-            "findmin": findmin,
+            # Native CP/MILP already minimize; the standalone findmin flag is
+            # reserved for incremental SAT/SMT descent.
+            "findmin": findmin and solver in {"sat", "smt"},
             "reducebasis": reducebasis,
             "known": known,
             "drawgraph": drawgraph,
             "satsolver": satsolver if satsolver is not None else (
-                "glucose3" if solver == "sat" and time_limit != -1 else "cadical153"
+                "glucose3" if solver == "maxsat" or solver == "sat" and time_limit != -1 else "cadical153"
             ),
             "smtsolver": smtsolver,
             "cpsolver": cpsolver,
@@ -304,22 +451,52 @@ def run_autoguess(
             "term_ordering": term_ordering,
             "overlapping_number": overlapping_number,
             "cnf_to_anf_conversion": cnf_to_anf_conversion,
+            "graph_view": graph_view,
+            "graph_scope": graph_scope,
+            "lower_bound": lower_bound,
+            "refine_basis": refine_basis,
+            "refine_trials": refine_trials,
+            "random_seed": random_seed,
         }
     )
+    for name, value in (("seed_basis", seed_basis), ("seed_basis_file", seed_basis_file),
+                        ("refine_time", refine_time)):
+        if value is not None:
+            params[name] = value
+
+    # Normalize original OCP IDs through the cleaner's actual alias map. The
+    # seed remains paid; fixed knowns and relation roles are never rewritten.
+    if seed_basis_file is not None:
+        seed_basis = _read_paid_seed(seed_basis_file)
+        params.pop("seed_basis_file")
+        params["seed_basis_source_file"] = seed_basis_file
+    if seed_basis is not None:
+        groups = [seed_basis] if isinstance(seed_basis, str) else seed_basis
+        aliases = (relation_metadata or {}).get("variable_aliases", {})
+        params["seed_basis"] = list(dict.fromkeys(
+            aliases.get(v.strip(), v.strip())
+            for group in groups for v in group.split(",") if v.strip()
+        ))
 
     # Import and run autoguess (inside the path context)
     from autoguess import startsearch, checkenvironment
 
     checkenvironment()
+    from core.graphreport import validate_graph_options
+    validate_graph_options(params, additional_paths=[seed_basis_file])
 
     if reducebasis:
         params["solver"] = "propagate"
         params["reducebasis"] = True
     Path(params["outputfile"]).parent.mkdir(parents=True, exist_ok=True)
-    result = startsearch(params)
+    from core.console import progress_output
+    with progress_output(verbose) if verbose is not None else nullcontext():
+        result = startsearch(params)
     if not isinstance(result, dict) or result.get("status") not in {"sat", "unsat", "unknown"}:
         raise RuntimeError("AutoGuess did not return a structured solver result")
     result["parameters"] = dict(params)
+    if print_result:
+        _print_result_summary(result)
     if cipher_or_function is not None:
         return _resolve_result(result, cipher_or_function)
     return result

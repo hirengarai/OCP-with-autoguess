@@ -34,6 +34,7 @@ SOFTWARE.
 from core import search
 from core.solverresult import timed_search
 from argparse import ArgumentParser, RawTextHelpFormatter
+import json
 import os
 import sys
 from config import TEMP_DIR
@@ -66,10 +67,36 @@ def startsearch(tool_parameters):
     Starts the search tool for the given parameters
     """
 
+    if tool_parameters.get("term_ordering", "degrevlex") != "degrevlex":
+        raise ValueError(
+            "Relation preprocessing only supports term_ordering='degrevlex'; "
+            "requested %r" % tool_parameters["term_ordering"]
+        )
+    checkenvironment()
+    from core.graphreport import validate_graph_options
+    validate_graph_options(tool_parameters)
     _resolve_dynamic_defaults(tool_parameters)
     for name in ("maxguess", "maxsteps"):
         if not isinstance(tool_parameters[name], int) or tool_parameters[name] < 0:
             raise ValueError("%s must be a nonnegative integer" % name)
+
+    if tool_parameters.get("findmin"):
+        if tool_parameters.get("reducebasis"):
+            raise ValueError("--findmin and --reducebasis cannot be combined")
+        if tool_parameters["solver"] not in ("sat", "smt", "maxsat"):
+            raise ValueError(
+                "--findmin supports SAT, SMT and MaxSAT; use --cpoptimization 1 for CP "
+                "or --milpdirection min for MILP"
+            )
+    if tool_parameters.get("reducebasis") or tool_parameters.get("_action") == "reducebasis":
+        if any(tool_parameters.get(key) for key in ("refine_basis", "lower_bound", "seed_basis_file")) or tool_parameters.get("seed_basis") is not None:
+            raise ValueError("--reducebasis cannot be combined with the paid-seed optimization options")
+    if tool_parameters.get("reducebasis") or tool_parameters.get("_action") == "reducebasis":
+        return search.search_using_reducebasis(tool_parameters)
+
+    from core.optimization import has_optimization_options, search_with_options
+    if has_optimization_options(tool_parameters):
+        return search_with_options(tool_parameters)
 
     # Handle program flow
     if tool_parameters["solver"] == "milp":
@@ -81,16 +108,10 @@ def startsearch(tool_parameters):
     elif tool_parameters["solver"] == "cp":
         return search.search_using_cp(tool_parameters)
     elif tool_parameters["solver"] == "groebner":
-        print(
-            "[ERROR] Groebner solver is not supported in this version (requires SageMath)."
+        raise ValueError(
+            "Groebner search requires SageMath and is unsupported here. "
+            "Use the original AutoGuess or choose sat, cp, milp, smt, mark, elim, propagate."
         )
-        print(
-            "        Please use the original autoguess: https://github.com/hadipourh/autoguess"
-        )
-        print(
-            "        Or choose another solver: sat, cp, milp, smt, mark, elim, propagate."
-        )
-        sys.exit(1)
     elif tool_parameters["solver"] == "mark":
         return search.search_using_mark(tool_parameters)
     elif tool_parameters["solver"] == "elim":
@@ -98,10 +119,7 @@ def startsearch(tool_parameters):
     elif tool_parameters["solver"] == "propagate":
         return search.search_using_propagate(tool_parameters)
     else:
-        print(
-            "Choose the solver from the following options please: cp, milp, sat, smt, mark, elim, propagate"
-        )
-    return
+        raise ValueError("Unknown solver: %s" % tool_parameters["solver"])
 
 
 def checkenvironment():
@@ -109,9 +127,7 @@ def checkenvironment():
     Basic checks if the environment is set up correctly
     """
 
-    if not os.path.exists(TEMP_DIR):
-        os.makedirs(TEMP_DIR)
-    return
+    os.makedirs(TEMP_DIR, exist_ok=True)
 
 
 def loadparameters(args):
@@ -121,7 +137,7 @@ def loadparameters(args):
 
     # Load default values
     params = {
-        "inputfile": "./ciphers/AES/relationfile_aes1kp_1r_mg6_ms14.txt",
+        "inputfile": None,
         "outputfile": "output",
         "maxguess": None,
         "maxsteps": None,
@@ -143,6 +159,8 @@ def loadparameters(args):
         "known": None,
         "threads": 0,
         "drawgraph": True,
+        "graph_scope": "targets",
+        "graph_view": "original",
         "findmin": False,
         "reducebasis": False,
     }
@@ -220,31 +238,63 @@ def loadparameters(args):
     if args.reducebasis:
         params["reducebasis"] = True
 
+    for key in ("graph_scope", "graph_view", "seed_basis", "seed_basis_file", "lower_bound", "refine_basis",
+                "refine_time", "random_seed", "refine_trials"):
+        value = getattr(args, key, None)
+        if value is not None:
+            params[key] = value
+
     # If reducebasis is requested, route to that handler
     if params["reducebasis"]:
         params["_action"] = "reducebasis"
 
-    if not args.satsolver and params["solver"] == "sat" and params["timelimit"] != -1:
+    if not args.satsolver and (params["solver"] == "maxsat" or
+                              params["solver"] == "sat" and params["timelimit"] != -1):
         params["satsolver"] = "glucose3"
 
     return params
 
 
-def _print_result(result):
-    """Summarize the current run, including a best basis after timeout."""
-    print("STATUS: %s" % result["status"].upper())
+def _print_result(result, requested_report):
+    """Print only the result of this invocation, including solver-free modes."""
+    status = result["status"]
+    print("STATUS: %s" % status.upper())
+    if status == "error":
+        print("ERROR: %s" % result["error"], file=sys.stderr)
+        return
     print("Termination: %s" % result.get("termination_reason", "unknown"))
     if result.get("timed_out"):
-        if result["status"] == "sat":
+        if status == "sat":
             print("Time limit reached; returning the best validated basis found (optimal: false).")
         else:
             print("Time limit reached; no complete basis was found (status: unknown).")
-    print("Optimal: %s" % ("yes" if result.get("optimal") else "not established"))
     if "elapsed_seconds" in result:
         print("Elapsed: %.3f seconds" % result["elapsed_seconds"])
+    print("Targets covered: %d / %d" % (
+        len(result.get("covered_target_variables", [])),
+        len(result.get("target_variables", [])),
+    ))
+    if result.get("cost") is not None:
+        print("Guess cost: %s" % result["cost"])
+        print("Guessed variables: %s" % (", ".join(result["guessed_variables"]) or "(none)"))
+    if "lower_bound" in result:
+        upper = result.get("upper_bound")
+        if upper is None and status == "sat":
+            upper = result.get("cost")
+        print("Cost bounds: %s .. %s" % (result["lower_bound"],
+              upper if upper is not None else "unknown"))
+    if result.get("propagation_steps") is not None:
+        print("Target propagation steps: %s" % result["propagation_steps"])
+    print("Optimal: %s" % ("yes" if result.get("optimal") else "not established"))
+    if result.get("outputfile"):
+        print("Current report: %s" % result["outputfile"])
+    elif os.path.exists(requested_report):
+        print("No report from this run; existing %s belongs to an earlier run." % requested_report)
+    for kind, path in result.get("graph_files", {}).items():
+        print("Current graph (%s): %s" % (kind.upper(), path))
 
 
-def main():
+def main(argv=None):
     """
     Parse the arguments and start the request functionality with the provided
     parameters.
@@ -256,7 +306,8 @@ def main():
         formatter_class=RawTextHelpFormatter,
     )
     parser.add_argument(
-        "-i", "--inputfile", nargs=1, help="Use an input file in plain text format"
+        "-i", "--inputfile", nargs=1, required=True,
+        help="Use an input file in plain text format"
     )
     parser.add_argument(
         "-o",
@@ -282,10 +333,11 @@ def main():
         "-s",
         "--solver",
         nargs=1,
-        choices=["cp", "milp", "sat", "smt", "groebner", "mark", "elim", "propagate"],
+        choices=["cp", "milp", "sat", "maxsat", "smt", "groebner", "mark", "elim", "propagate"],
         help="cp = solve the problem using CP solvers\n"
         "milp = solve the problem using the MILP solvers\n"
         "sat = solve the problem using the SAT solvers\n"
+        "maxsat = minimize weighted guesses using RC2/Glucose3\n"
         "smt = solve the problem using the SMT solvers\n"
         "mark = use the marking algorithm\n"
         "elim = use the elimination algorithm\n"
@@ -371,6 +423,7 @@ def main():
         "--tikz",
         nargs=1,
         type=int,
+        choices=[0, 1],
         help="Set to 1 to generate the tikz code of the determination flow graph\n",
     )
     parser.add_argument(
@@ -392,7 +445,7 @@ def main():
         "--term_ordering",
         nargs=1,
         type=str,
-        help='A degree compatible term ordering such as "degrevlex" or "deglex"\n',
+        help='Relation preprocessing supports only "degrevlex"\n',
     )
     parser.add_argument(
         "-oln",
@@ -420,9 +473,6 @@ def main():
             "twopi",
             "fdp",
             "neato",
-            "nop",
-            "nop1",
-            "nop2",
             "osage",
             "patchwork",
             "sfdp",
@@ -457,33 +507,88 @@ def main():
         action="store_true",
         help="Skip generation of the determination flow graph\n",
     )
+    parser.add_argument("--verbose", action="store_true",
+                        help="Show model-generation and solver progress in addition to the final result")
+    parser.add_argument("--graph-view", choices=["original", "deduction"], default="original",
+                        help="Original AutoGuess graph or deduction layers (default: original)")
+    parser.add_argument("--graph-scope", choices=["targets", "full"], default="targets",
+                        help="Scope for the deduction view: target dependencies or full closure (default: targets)")
     parser.add_argument(
         "--findmin",
         action="store_true",
-        help="Find the minimum number of guessed variables (incremental for SAT, descent for others)\n",
+        help="Minimize guess cost (SAT/SMT; MaxSAT always minimizes)\n",
     )
     parser.add_argument(
         "--reducebasis",
         action="store_true",
         help="Try to reduce the provided guess basis (via --known) using propagation\n",
     )
+    parser.add_argument(
+        "--json-output",
+        metavar="FILE",
+        help="Write the current-run status and validated result as JSON\n",
+    )
+    seeds = parser.add_mutually_exclusive_group()
+    seeds.add_argument("--seed-basis", nargs="+", metavar="VAR",
+                       help="Fully paid starting guesses; spaces or commas accepted")
+    seeds.add_argument("--seed-basis-file", metavar="FILE",
+                       help="JSON guess list or previous result containing guessed_variables")
+    parser.add_argument("--lower-bound", action="store_true",
+                        help="Generate and verify a formal lower-bound certificate before search")
+    parser.add_argument("--refine-basis", action="store_true",
+                        help="Refine the paid seed for lower cost, then fewer propagation steps")
+    parser.add_argument("--refine-time", type=float,
+                        help="Maximum seconds for refinement within the shared budget (default: at most 1s/20%%)")
+    parser.add_argument("--random-seed", type=int, default=0,
+                        help="Random seed for optional basis refinement (default: 0)")
+    parser.add_argument("--refine-trials", type=int, default=1000,
+                        help="Maximum refinement trials (default: 1000)")
 
     # Parse command line arguments and construct parameter list.
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     params = loadparameters(args)
+    # A sidecar must never overwrite the relation system or the text report.
+    if args.json_output and os.path.realpath(args.json_output) in {
+        os.path.realpath(params["inputfile"]), os.path.realpath(params["outputfile"])
+    }:
+        parser.error("--json-output must differ from both the input file and text report")
+    if os.path.realpath(params["inputfile"]) == os.path.realpath(params["outputfile"]):
+        parser.error("the text report must differ from the input file")
+    if args.seed_basis_file and os.path.realpath(args.seed_basis_file) in {
+        os.path.realpath(params["outputfile"]),
+        os.path.realpath(args.json_output) if args.json_output else None,
+    }:
+        parser.error("seed-basis input must differ from output paths")
+    from core.graphreport import validate_graph_options
+    try:
+        validate_graph_options(params, additional_paths=[args.json_output])
+    except ValueError as exc:
+        parser.error(str(exc))
 
-    # Check if environment is setup correctly.
-    checkenvironment()
-
-    # Handle reducebasis action
-    if params.get("_action") == "reducebasis":
-        result = search.search_using_reducebasis(params)
-    else:
-        result = startsearch(params)
-
-    _print_result(result)
+    try:
+        from core.console import progress_output
+        with progress_output(args.verbose):
+            result = startsearch(params)
+    except Exception as exc:
+        # Keep failures available to automation without rereading old reports.
+        result = {"status": "error", "error": str(exc), "outputfile": None,
+                  "targets_covered": False, "optimal": False}
+    if args.json_output:
+        from core.solverresult import atomic_write
+        atomic_write(args.json_output, json.dumps(result, indent=2) + "\n")
+    _print_result(result, params["outputfile"])
     return result
 
 
+def cli():
+    """Translate current-run status to a shell exit code."""
+    try:
+        result = main()
+    except Exception as exc:
+        print("ERROR: %s" % exc, file=sys.stderr)
+        return 2
+    return {"sat": 0, "unsat": 1, "error": 2, "unknown": 3}.get(result["status"], 2)
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(cli())

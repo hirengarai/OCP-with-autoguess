@@ -36,7 +36,7 @@ import hashlib
 from pathlib import Path
 from typing import List, Optional
 
-from tools.autoguess_wrapper import _variable_dictionary, run_autoguess
+from tools.autoguess_wrapper import _validate_solver_options, _variable_dictionary, run_autoguess
 from tools.relation_generator import generate_relations
 
 
@@ -52,11 +52,11 @@ GOALS = ("GUESSBASIS", "REDUCEBASIS")
 # Accepted values of config_model["model_type"]: the framework AutoGuess encodes
 # the guess-and-determine problem into. The OCP analogue is the 'milp'/'sat'
 # switch used by the differential/linear/integral engines.
-MODEL_TYPES = ("sat", "milp", "smt", "cp", "mark", "elim", "propagate")
+MODEL_TYPES = ("sat", "maxsat", "milp", "smt", "cp", "mark", "elim", "propagate")
 
 # Frameworks whose concrete backend is selectable through config_solver["solver"],
 # and the run_autoguess argument that carries it.
-_BACKEND_ARG = {"sat": "satsolver", "smt": "smtsolver", "cp": "cpsolver"}
+_BACKEND_ARG = {"sat": "satsolver", "maxsat": "satsolver", "smt": "smtsolver", "cp": "cpsolver"}
 
 
 # Configuration objects
@@ -140,6 +140,18 @@ class SolverConfig:
     tikz: int = 0
     dglayout: str = "dot"
     log: int = 0
+    D: int = 2
+    seed_basis: Optional[List[str]] = None
+    seed_basis_file: Optional[str] = None
+    lower_bound: bool = False
+    refine_basis: bool = False
+    refine_time: Optional[float] = None
+    refine_trials: int = 1000
+    random_seed: int = 0
+    graph_view: str = "original"
+    graph_scope: str = "targets"
+    verbose: Optional[bool] = None
+    print_result: bool = False
 
 
 # Keys accepted in each configuration dict.
@@ -148,7 +160,9 @@ _RELGEN_KEYS = {f.name for f in fields(RelGenConfig)}
 _MODEL_LOCAL_KEYS = {"model_type", "filename", "name_prefix", "maxsteps"}
 _MODEL_KEYS = _RELGEN_KEYS | _MODEL_LOCAL_KEYS
 _SOLVER_KEYS = {"solver", "time_limit", "timelimit", "threads", "preprocess",
-                "milpdirection", "cpoptimization", "dglayout"}
+                "milpdirection", "cpoptimization", "dglayout", "D",
+                "seed_basis", "seed_basis_file", "lower_bound", "refine_basis",
+                "refine_time", "refine_trials", "random_seed", "graph_view", "graph_scope"}
 
 
 # =================== Configuration parsing ===================
@@ -263,7 +277,7 @@ def _backend_kwargs(model_type, solver, timelimit=-1):
                   f"has no selectable backend. Applicable to {sorted(_BACKEND_ARG)}.")
         return {}
     if solver == "DEFAULT":
-        if model_type == "sat" and timelimit != -1:
+        if model_type == "maxsat" or model_type == "sat" and timelimit != -1:
             return {arg: "glucose3"}
         return {}
     return {arg: solver}
@@ -276,10 +290,10 @@ def _verbosity_kwargs(show_mode):
     graph is part of the result, the solver log is noise about how it was found.
     """
     return {
-        0: {"log": 0, "drawgraph": False, "tikz": 0},  # results only
-        1: {"log": 0, "drawgraph": True, "tikz": 0},   # + determination graph
-        2: {"log": 1, "drawgraph": True, "tikz": 0},   # + solver log
-        3: {"log": 1, "drawgraph": True, "tikz": 1},   # + TikZ source
+        0: {"log": 0, "drawgraph": False, "tikz": 0, "verbose": False, "print_result": True},
+        1: {"log": 0, "drawgraph": True, "tikz": 0, "verbose": False, "print_result": True},
+        2: {"log": 1, "drawgraph": True, "tikz": 0, "verbose": True, "print_result": True},
+        3: {"log": 1, "drawgraph": True, "tikz": 1, "verbose": True, "print_result": True},
     }[show_mode]
 
 
@@ -315,7 +329,13 @@ def search_guess_basis(cipher_or_function, goal="GUESSBASIS", known_vars=None,
             ``_parse_and_set_configs``. Accepts ``"solver"``, ``"time_limit"``
             (or its existing spelling ``"timelimit"``),
             ``"threads"``, ``"preprocess"``, ``"milpdirection"``,
-            ``"cpoptimization"`` and ``"dglayout"``.
+            ``"cpoptimization"``, ``"dglayout"``, ``"D"``, ``"graph_view"``,
+            ``"graph_scope"``, ``"seed_basis"`` / ``"seed_basis_file"``,
+            ``"lower_bound"``, ``"refine_basis"``, ``"refine_time"``,
+            ``"refine_trials"`` and ``"random_seed"``. Paid seeds use variable
+            ID strings, including a previous result's ``guessed_variable_ids``;
+            original IDs are normalized through relation cleaning. They never
+            become fixed ``known_vars``. MaxSAT always minimizes guess cost.
 
     Returns:
         dict: The guess basis found, with keys
@@ -369,6 +389,27 @@ def search_guess_basis(cipher_or_function, goal="GUESSBASIS", known_vars=None,
     if maxsteps is not None and (type(maxsteps) is not int or maxsteps < 0):
         raise ValueError("config_model['maxsteps'] must be a nonnegative integer or None")
 
+    solver_cfg = SolverConfig(
+        solver=model_type,
+        findmin=findmin and model_type in {"sat", "smt"},
+        maxguess=maxguess,
+        maxsteps=config_model.get("maxsteps"),
+        reducebasis=(goal == "REDUCEBASIS"),
+        **_backend_kwargs(model_type, config_solver["solver"], config_solver.get("timelimit", -1)),
+        **{k: v for k, v in config_solver.items() if k != "solver"},
+        **_verbosity_kwargs(show_mode),
+    )
+    ag_outputfile = str(Path(relation_file).parent / Path(relation_file).stem.replace("relations_", "output_"))
+    if Path(ag_outputfile).resolve() == Path(relation_file).resolve():
+        # A custom extensionless filename has no suffix to distinguish it
+        # from the report stem. Keep that supported input without overwriting it.
+        ag_outputfile += "_output"
+    if solver_cfg.seed_basis_file is not None:
+        seed_source = Path(solver_cfg.seed_basis_file).expanduser().resolve()
+        if seed_source in {Path(relation_file).resolve(), Path(ag_outputfile).resolve()}:
+            raise ValueError("The paid seed input must differ from the relation input and report paths")
+    _validate_solver_options(asdict(solver_cfg))
+
     # Step 2. Keep at least one target unguessable, otherwise the solver returns
     # the trivial basis "guess the targets".
     if target_vars:
@@ -381,6 +422,7 @@ def search_guess_basis(cipher_or_function, goal="GUESSBASIS", known_vars=None,
 
     # Step 3. Generate the relation system for the cipher.
     relgen_cfg = RelGenConfig(**{k: v for k, v in config_model.items() if k in _RELGEN_KEYS})
+    relation_metadata = {}
     relations = generate_relations(
         cipher_or_function,
         function_mode=function_mode,
@@ -388,25 +430,13 @@ def search_guess_basis(cipher_or_function, goal="GUESSBASIS", known_vars=None,
         target=target_vars,
         not_guessed=not_guessed_vars,
         output_file=relation_file,
+        metadata_out=relation_metadata,
+        verbose=show_mode >= 2,
         **asdict(relgen_cfg),
     )
 
     # Step 4. Solve it. AutoGuess' own "solver" argument names the framework,
     # which is what config_model["model_type"] carries here.
-    solver_cfg = SolverConfig(
-        solver=model_type,
-        findmin=findmin,
-        maxguess=maxguess,
-        maxsteps=config_model.get("maxsteps"),
-        reducebasis=(goal == "REDUCEBASIS"),
-        **_backend_kwargs(model_type, config_solver["solver"], config_solver.get("timelimit", -1)),
-        **{k: v for k, v in config_solver.items() if k != "solver"},
-        **_verbosity_kwargs(show_mode),
-    )
-    ag_outputfile = str(
-        Path(relation_file).parent
-        / Path(relation_file).stem.replace("relations_", "output_")
-    )
     # Known IDs in the cleaned file may differ from the caller's IDs after
     # alias substitution. Do not add the original names as disconnected knowns.
     basis = None
@@ -432,9 +462,10 @@ def search_guess_basis(cipher_or_function, goal="GUESSBASIS", known_vars=None,
         cipher_or_function=cipher_or_function,
         outputfile=ag_outputfile,
         known=basis,
+        relation_metadata=relation_metadata,
         **asdict(solver_cfg),
     )
-    if result["status"] == "sat" and maxguess is not None and len(result["guessed_variable_ids"]) > maxguess:
+    if result["status"] == "sat" and maxguess is not None and result["cost"] > maxguess:
         raise RuntimeError("AutoGuess returned a basis exceeding the requested guess bound")
     result.update({
         "relation_file": relation_file,

@@ -1,4 +1,0 @@
-# Optional compiled Sage-library reference, installed in a SEPARATE environment.
-# OCP itself does not import or require these packages.
-passagemath-brial==10.8.13
-passagemath-modules[gf2]==10.8.13

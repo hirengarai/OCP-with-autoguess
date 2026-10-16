@@ -26,13 +26,12 @@ import random
 import minizinc
 from core.inputparser import read_relation_file
 from core.parsesolution import parse_solver_solution
-from core.graphdrawer import draw_graph
 from config import TEMP_DIR, MINIZINC_LIB_DIR, ensure_minizinc_driver
 
 ensure_minizinc_driver()
+from core.console import progress
 from core.varnames import step_var, path_var
 import datetime
-import subprocess
 
 
 class ReduceGDtoCP:
@@ -67,6 +66,10 @@ class ReduceGDtoCP:
         log=0,
         threads=0,
         extra_known=None,
+        prepared_data=None,
+        graph_scope="targets",
+        graph_view="original",
+        defer_reporting=False,
     ):
         self.inputfile_name = inputfile_name
         self.output_dir = outputfile_name
@@ -76,6 +79,9 @@ class ReduceGDtoCP:
         self.cp_solver_name = cp_solver_name
         self.dglayout = dglayout
         self.draw_graph = drawgraph
+        self.graph_scope = graph_scope
+        self.graph_view = graph_view
+        self.defer_reporting = defer_reporting
         self.log = log
         self.supported_cp_solvers = [
             solver_name
@@ -96,9 +102,8 @@ class ReduceGDtoCP:
                     f"Solver '{self.cp_solver_name}' is not available and no "
                     f"fallback solver found.  Available: {self.supported_cp_solvers}"
                 )
-            print(f"WARNING: Solver '{self.cp_solver_name}' not available.")
-            print(f"  Available: {self.supported_cp_solvers}")
-            print(f"  Falling back to: {fallback}")
+            print(f"WARNING: Solver '{self.cp_solver_name}' is unavailable; using '{fallback}'. "
+                  f"Available: {self.supported_cp_solvers}")
             self.cp_solver_name = fallback
         self.cp_solver = minizinc.Solver.lookup(self.cp_solver_name)
         self.cp_optimization = cp_optimization
@@ -107,14 +112,14 @@ class ReduceGDtoCP:
         self._cp_vars_set = set()
         self._constraint_lines = []
         self.extra_known = extra_known
-        self._parse_input_file(preprocess, D)
+        self._parse_input_file(preprocess, D, prepared_data)
         self._set_max_guess()
         self.deductions = self.generate_possible_deductions()
         self.time_limit = -1
         self.tikz = tikz
 
-    def _parse_input_file(self, preprocess, D):
-        parsed_data = read_relation_file(
+    def _parse_input_file(self, preprocess, D, prepared_data=None):
+        parsed_data = prepared_data if prepared_data is not None else read_relation_file(
             self.inputfile_name, preprocess, D, self.log, extra_known=self.extra_known
         )
         self.problem_name = parsed_data["problem_name"]
@@ -136,7 +141,7 @@ class ReduceGDtoCP:
             weights = self.target_weights or {}
             self.max_guess = sum(weights.get(v, 1) for v in self.variables
                                  if v not in self.known_variables)
-            print(
+            progress(
                 "Number of guessed variables is set to be at most %d" % self.max_guess
             )
 
@@ -284,17 +289,17 @@ class ReduceGDtoCP:
         """
         This method makes the CP model, and then write it into a file in mzn format
         """
-        print("=" * 60)
-        print("CP SOLVER — %s" % self.problem_name)
-        print("=" * 60)
-        print(
+        progress("=" * 60)
+        progress("CP SOLVER — %s" % self.problem_name)
+        progress("=" * 60)
+        progress(
             "Variables: %d | Relations: %d" % (self.num_of_vars, self.num_of_relations)
         )
-        print("Max guess: %d | Max steps: %d" % (self.max_guess, self.max_steps))
-        print("Solver: %s" % self.cp_solver_name)
-        print("-" * 60)
-        print("MODEL GENERATION")
-        print("-" * 60)
+        progress("Max guess: %d | Max steps: %d" % (self.max_guess, self.max_steps))
+        progress("Solver: %s" % self.cp_solver_name)
+        progress("-" * 60)
+        progress("MODEL GENERATION")
+        progress("-" * 60)
         start_time = time.time()
         self.generate_cp_constraints()
         self.generate_initial_conditions()
@@ -309,7 +314,7 @@ class ReduceGDtoCP:
             % (self.max_guess, self.max_steps, self.rnd_string_tmp),
         )
         elapsed_time = time.time() - start_time
-        print("CP model generated in %0.2f seconds" % elapsed_time)
+        progress("CP model generated in %0.2f seconds" % elapsed_time)
         with open(self.cp_file_path, "w") as minizinc_file:
             minizinc_file.write(self.cp_constraints)
         self.cp_model = minizinc.Model()
@@ -334,9 +339,9 @@ class ReduceGDtoCP:
             else None
         )
         nthreads = self.nthreads if "-p" in self.cp_solver.stdFlags else None
-        print("-" * 60)
-        print("SOLVING")
-        print("-" * 60)
+        progress("-" * 60)
+        progress("SOLVING")
+        progress("-" * 60)
         start_time = time.time()
         # Temporarily set LD_LIBRARY_PATH for bundled solver shared libs
         # (e.g. fzn-cp-sat / OR-Tools).  Scoped here so it does not pollute
@@ -371,7 +376,7 @@ class ReduceGDtoCP:
             if self.log == 0 and os.path.exists(self.cp_file_path):
                 os.remove(self.cp_file_path)
         elapsed_time = time.time() - start_time
-        print("Solving finished in %0.2f seconds" % elapsed_time)
+        progress("Solving finished in %0.2f seconds" % elapsed_time)
         return self._handle_solver_result(result)
 
     def _handle_solver_result(self, result):
@@ -409,34 +414,24 @@ class ReduceGDtoCP:
         ] or (result.status == minizinc.Status.UNKNOWN and result.solution not in (None, [])):
             self._extract_solution(result)
             parse_solver_solution(self)
-            if self.draw_graph:
-                draw_graph(
-                    self.vertices,
-                    self.edges,
-                    self.known_variables,
-                    self.guessed_vars,
-                    self.output_dir,
-                    self.tikz,
-                    self.dglayout,
-                )
             return True
         elif result.status == minizinc.Status.UNSATISFIABLE:
-            print("\n" + "=" * 60)
-            print("RESULT: UNSATISFIABLE")
-            print("The model is UNSAT!")
-            print("Increase max_guess or max_steps and try again.")
-            print("=" * 60)
+            progress("\n" + "=" * 60)
+            progress("RESULT: UNSATISFIABLE")
+            progress("The model is UNSAT!")
+            progress("Increase max_guess or max_steps and try again.")
+            progress("=" * 60)
             return False
         elif result.status == minizinc.Status.ERROR:
-            print("\n" + "=" * 60)
-            print("RESULT: ERROR")
-            print(result.status)
-            print("=" * 60)
+            progress("\n" + "=" * 60)
+            progress("RESULT: ERROR")
+            progress(result.status)
+            progress("=" * 60)
         else:
-            print("\n" + "=" * 60)
-            print("RESULT: %s" % self.termination_reason.upper())
-            print("The solver stopped before finding any solution.")
-            print("=" * 60)
+            progress("\n" + "=" * 60)
+            progress("RESULT: %s" % self.termination_reason.upper())
+            progress("The solver stopped before finding any solution.")
+            progress("=" * 60)
             return None
 
     def _extract_solution(self, result):

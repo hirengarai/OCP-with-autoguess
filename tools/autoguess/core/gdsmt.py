@@ -51,13 +51,12 @@ from pysmt.shortcuts import (
     types,
     BV,
     Equals,
-    write_smtlib,
 )
-from math import ceil, log2
+from math import ceil
 from pysmt.exceptions import SolverReturnedUnknownResultError
 from core.inputparser import read_relation_file
 from core.parsesolution import parse_solver_solution
-from core.graphdrawer import draw_graph
+from core.console import progress
 from core.varnames import step_var, path_var
 
 
@@ -91,6 +90,10 @@ class ReduceGDtoSMT:
         drawgraph=True,
         log=0,
         extra_known=None,
+        prepared_data=None,
+        graph_scope="targets",
+        graph_view="original",
+        defer_reporting=False,
     ):
         self.inputfile_name = inputfile_name
         self.output_dir = outputfile_name
@@ -100,6 +103,9 @@ class ReduceGDtoSMT:
         self.smt_solver_name = smt_solver_name
         self.dglayout = dglayout
         self.draw_graph = drawgraph
+        self.graph_scope = graph_scope
+        self.graph_view = graph_view
+        self.defer_reporting = defer_reporting
         self.log = log
         # Supported SMT solvers:
         # msat      True (5.6.1)
@@ -120,7 +126,7 @@ class ReduceGDtoSMT:
         self.smt_formula = TRUE()
         ###############################
         # Read and parse the input file
-        parsed_data = read_relation_file(
+        parsed_data = prepared_data if prepared_data is not None else read_relation_file(
             self.inputfile_name,
             preprocess=preprocess,
             D=D,
@@ -287,17 +293,17 @@ class ReduceGDtoSMT:
         """
         This method makes the SMT model, and then write it into an smt file
         """
-        print("=" * 60)
-        print("SMT SOLVER — %s" % self.problem_name)
-        print("=" * 60)
-        print(
+        progress("=" * 60)
+        progress("SMT SOLVER — %s" % self.problem_name)
+        progress("=" * 60)
+        progress(
             "Variables: %d | Relations: %d" % (self.num_of_vars, self.num_of_relations)
         )
-        print("Max guess: %d | Max steps: %d" % (self.max_guess, self.max_steps))
-        print("Solver: %s" % self.smt_solver_name)
-        print("-" * 60)
-        print("MODEL GENERATION")
-        print("-" * 60)
+        progress("Max guess: %d | Max steps: %d" % (self.max_guess, self.max_steps))
+        progress("Solver: %s" % self.smt_solver_name)
+        progress("-" * 60)
+        progress("MODEL GENERATION")
+        progress("-" * 60)
         start_time = time.time()
         self.generate_smt_constraints()
         self.generate_initial_conditions()
@@ -310,7 +316,7 @@ class ReduceGDtoSMT:
         # human_readable_formula = serialize(self.smt_formula)
         elapsed_time = time.time() - start_time
         # write_smtlib(self.smt_formula, self.smt_file_path)
-        print("SMT model generated in %0.2f seconds" % elapsed_time)
+        progress("SMT model generated in %0.2f seconds" % elapsed_time)
 
     def solve_via_smtsolver(self):
         """
@@ -341,9 +347,9 @@ class ReduceGDtoSMT:
         self.smt_solver.options.random_seed = random.randint(0, 1000)
         # self.smt_solver.options.random_seed = 1370
         #
-        print("-" * 60)
-        print("SOLVING")
-        print("-" * 60)
+        progress("-" * 60)
+        progress("SOLVING")
+        progress("-" * 60)
         start_time = time.time()
         ##########################
         ##########################
@@ -366,9 +372,9 @@ class ReduceGDtoSMT:
         ##########################
         ##########################
         elapsed_time = time.time() - start_time
-        print("Solving finished in %0.2f seconds" % elapsed_time)
+        progress("Solving finished in %0.2f seconds" % elapsed_time)
         # solver_info = self.smt_solver.get_info()
-        # print(solver_statistics)
+        # progress(solver_statistics)
         if result == True:
             self.termination_reason = "solution_found"
             # Extract the solution
@@ -383,28 +389,18 @@ class ReduceGDtoSMT:
                 # state_values = list(map(lambda vx: self.smt_solver_model.get_py_value(vx), temp))
                 self.solutions[step] = dict(zip(state_vars, state_values))
             parse_solver_solution(self)
-            if self.draw_graph:
-                draw_graph(
-                    self.vertices,
-                    self.edges,
-                    self.known_variables,
-                    self.guessed_vars,
-                    self.output_dir,
-                    self.tikz,
-                    self.dglayout,
-                )
             return True
         elif result == False:
             self.termination_reason = "infeasible"
-            print("\n" + "=" * 60)
-            print("RESULT: UNSATISFIABLE")
-            print("The model is UNSAT!")
-            print("Increase max_guess or max_steps and try again.")
-            print("=" * 60)
+            progress("\n" + "=" * 60)
+            progress("RESULT: UNSATISFIABLE")
+            progress("The model is UNSAT!")
+            progress("Increase max_guess or max_steps and try again.")
+            progress("=" * 60)
             return False
         else:
-            print("\n" + "=" * 60)
-            print("RESULT: %s" % self.termination_reason.upper())
-            print("The solver stopped before finding any solution.")
-            print("=" * 60)
+            progress("\n" + "=" * 60)
+            progress("RESULT: %s" % self.termination_reason.upper())
+            progress("The solver stopped before finding any solution.")
+            progress("=" * 60)
             return None

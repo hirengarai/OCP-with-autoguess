@@ -154,6 +154,8 @@ def generate_relations(
     strict_anchored: bool = False,
     emit_debug_chains: bool = False,
     bridge_skipped_rounds: bool = True,
+    metadata_out: Optional[dict] = None,
+    verbose: bool = True,
 ) -> List[str]:
     """
     Generate AutoGuess-compatible relation file from an OCP cipher or function.
@@ -234,6 +236,14 @@ def generate_relations(
         moved through the substitutions). Off by default: the file ends at
         ``end``.
 
+    metadata_out : dict, optional
+        Fill with actual cleaner aliases for normalizing original-ID paid seeds.
+        The returned relation lines are identical with or without metadata.
+
+    verbose : bool
+        Print the two relation-generation progress messages. Warnings remain
+        visible independently of this setting.
+
     Returns
     -------
     List of cleaned relation strings.
@@ -278,6 +288,10 @@ def generate_relations(
             **emitter_kwargs,
         )
 
+    # Materialize role iterables once before formatting.
+    known = list(known) if known is not None else None
+    target = list(target) if target is not None else None
+    not_guessed = list(not_guessed) if not_guessed is not None else None
     # Step 2: Format with section headers
     formatted = _format_with_headers(raw, known, target, not_guessed)
 
@@ -303,9 +317,12 @@ def generate_relations(
         # Internal markers control aliasing only; they are not AutoGuess IDs.
         formatted = cleaner._strip_nonrename_markers(formatted)
         _save_lines(formatted, output_file)
+        if metadata_out is not None:
+            _relation_metadata(metadata_out)
         return formatted
 
-    print("Preparing final relations for Autoguess ...")
+    if verbose:
+        print("Preparing final relations for Autoguess ...")
 
     _direction = cleaning_direction if cleaning_direction is not None else "default"
     cleaner_config = cleaner.CleanerConfig(
@@ -314,7 +331,17 @@ def generate_relations(
         strict_anchored=bool(strict_anchored),
         emit_debug_chains=bool(emit_debug_chains),
     )
-    cleaned = cleaner.clean_relations(formatted, config=cleaner_config)
+    if metadata_out is None:
+        cleaned = cleaner.clean_relations(formatted, config=cleaner_config)
+    else:
+        parsed = cleaner.parse_input(formatted)
+        same = cleaner.collapse_same_round(parsed, cleaner_config)
+        cross = cleaner.collapse_cross_round(parsed, same.substitution, cleaner_config)
+        substitution = cleaner.SubstitutionMap.compose(same.substitution, cross.substitution)
+        cleaned = cleaner.rewrite_and_format(parsed, substitution,
+            same.preserved + cross.preserved, cleaner_config,
+            same_sub=same.substitution, cross_sub=cross.substitution)
+        _relation_metadata(metadata_out, substitution)
 
     # Step 6: Save and report
     _save_lines(cleaned, output_file)
@@ -324,6 +351,15 @@ def generate_relations(
         display = Path(output_file).relative_to(_project_root())
     except ValueError:
         display = Path(output_file)
-    print(f"{count} relations prepared and written to {display}")
+    if verbose:
+        print(f"{count} relations prepared and written to {display}")
 
     return cleaned
+
+
+def _relation_metadata(output, substitution=None):
+    """Expose only actual renames; unchanged IDs need no normalization."""
+    output.clear()
+    output["variable_aliases"] = {
+        value: substitution.resolve(value) for value in sorted(substitution.as_dict())
+    } if substitution is not None else {}

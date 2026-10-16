@@ -21,6 +21,7 @@ In case you use this tool please include the above copyright informations (name,
 """
 
 from core.varnames import step_var
+from core.console import progress
 from core.solverresult import current_result, atomic_write
 
 
@@ -29,8 +30,8 @@ def parse_solver_solution(gd):
     This method parses the obtained solution (if exists), into a human readable format
     """
 
-    gd.vertices = []
-    gd.edges = []
+    for name in ("_graph_files", "_graph_summary", "_graph_warnings"):
+        setattr(gd, name, None)
     gd.guessed_vars = [
         v
         for v in gd.variables
@@ -41,6 +42,15 @@ def parse_solver_solution(gd):
     validated = current_result(gd, True)
     if validated["status"] != "sat":
         raise RuntimeError("Solver model does not determine targets: " + ", ".join(validated["missing_targets"]))
+    gd._report_written = None
+    if getattr(gd, "defer_reporting", False):
+        return
+
+    from core.originalgraph import build_original_graph
+    flow_graph = build_original_graph(gd.__dict__, gd.guessed_vars,
+                                     max_steps=gd.max_steps, solutions=gd.solutions)
+    gd.vertices = flow_graph["original_vertices"]
+    gd.edges = [tuple(edge) for edge in flow_graph["original_edges"]]
     numbers_of_guesses = sum(gd.solutions[0].values()) - len(gd.known_variables)
 
     if numbers_of_guesses != len(gd.guessed_vars):
@@ -58,18 +68,18 @@ def parse_solver_solution(gd):
         else:
             guessed_vars_pretty.append(v)
 
-    print("\n" + "=" * 60)
-    print("RESULTS")
-    print("=" * 60)
-    print(f"Number of guesses:         {numbers_of_guesses}")
+    progress("\n" + "=" * 60)
+    progress("RESULTS")
+    progress("=" * 60)
+    progress(f"Number of guesses:         {numbers_of_guesses}")
     if getattr(gd, "target_weights", None):
-        print(f"Total guess weight:        {validated['cost']}")
-    print(f"Known in final state:      {gd.final_info} / {len(gd.variables)}")
-    print(f"Max steps used:            {gd.max_steps}")
-    print("-" * 60)
-    print(f"Guessed variable(s) ({len(gd.guessed_vars)}):")
-    print(f'  {", ".join(guessed_vars_pretty)}')
-    print("=" * 60)
+        progress(f"Total guess weight:        {validated['cost']}")
+    progress(f"Known in final state:      {gd.final_info} / {len(gd.variables)}")
+    progress(f"Maximum allowed steps:     {gd.max_steps}")
+    progress("-" * 60)
+    progress(f"Guessed variable(s) ({len(gd.guessed_vars)}):")
+    progress(f'  {", ".join(guessed_vars_pretty)}')
+    progress("=" * 60)
 
     separator_line = "#" * 60
     output_buffer = ""
@@ -90,14 +100,6 @@ def parse_solver_solution(gd):
         % (gd.final_info, gd.num_of_vars, gd.max_steps)
     )
     output_buffer += separator_line
-    guessed_vars_pretty = []
-    for v in gd.guessed_vars:
-        if hasattr(gd, "dummy_mapping") and v in gd.dummy_mapping:
-            guessed_vars_pretty.append(
-                f"{v} (represents: {' * '.join(gd.dummy_mapping[v])})"
-            )
-        else:
-            guessed_vars_pretty.append(v)
     output_buffer += f"\nThe following {len(gd.guessed_vars)} variable(s) are guessed:\n{', '.join(guessed_vars_pretty)}\n"
     output_buffer += separator_line
     output_buffer += "\nThe following %d variable(s) are initially known:\n%s\n" % (
@@ -109,91 +111,33 @@ def parse_solver_solution(gd):
     output_buffer += separator_line
     output_buffer += "\nDetermination flow:\n"
 
-    step = 0
     variables_deductor_relations = {
         v: {"deductor_relations": [], "number_of_deductions": 0} for v in gd.variables
     }
     detector_relations = []
     used_symmetric_relations = []
     used_implication_relations = []
-    determined_target_variables = {v: 0 for v in gd.target_variables}
-
-    for v in gd.known_variables + gd.guessed_vars:
-        determined_target_variables[v] = 1
-
-    while step < gd.max_steps + 1 and not all(determined_target_variables.values()):
+    by_source_step = {}
+    for deduction in flow_graph["deductions"]:
+        by_source_step.setdefault(deduction["source_step"], []).append(deduction)
+    for step in range(flow_graph["metadata"]["steps_scanned"]):
         output_buffer += "\nState %d:\n" % step
-
-        for rel in gd.symmetric_relations:
-            rel_known_vars = [
-                v for v in rel if gd.solutions[step][step_var(v, step)] == 1
-            ]
-            if len(rel_known_vars) == (len(rel) - 1):
-                determined_var = list(set(rel) - set(rel_known_vars))
-                lhs = ", ".join(rel_known_vars)
-                rhs = ", ".join(determined_var)
-                gd.vertices.append(rhs)
-                variables_deductor_relations[determined_var[0]][
-                    "number_of_deductions"
-                ] += 1
-                variables_deductor_relations[determined_var[0]][
-                    "deductor_relations"
-                ].append(", ".join(rel))
-                for vr in rel_known_vars:
-                    gd.vertices.append(vr)
-                    gd.edges.append(
-                        (
-                            vr,
-                            rhs,
-                            variables_deductor_relations[determined_var[0]][
-                                "number_of_deductions"
-                            ],
-                        )
-                    )
-                if determined_var[0] in gd.target_variables:
-                    determined_target_variables[determined_var[0]] = 1
-                output_buffer += (
-                    "%s in symmetric relation [%s] are known: %s ===> %s\n"
-                    % (lhs, ", ".join(rel), lhs, rhs)
-                )
-                used_symmetric_relations.append(rel)
-
-        for rel in gd.implication_relations:
-            rel_known_vars = [
-                v for v in rel if gd.solutions[step][step_var(v, step)] == 1
-            ]
-            if rel_known_vars == rel[0:-1]:
-                determined_var = [rel[-1]]
-                lhs = ", ".join(rel_known_vars)
-                rhs = ", ".join(determined_var)
-                gd.vertices.append(rhs)
-                variables_deductor_relations[determined_var[0]][
-                    "number_of_deductions"
-                ] += 1
-                variables_deductor_relations[determined_var[0]][
-                    "deductor_relations"
-                ].append(", ".join(rel[0:-1]) + " => " + rel[-1])
-                for vr in rel_known_vars:
-                    gd.vertices.append(vr)
-                    gd.edges.append(
-                        (
-                            vr,
-                            rhs,
-                            variables_deductor_relations[determined_var[0]][
-                                "number_of_deductions"
-                            ],
-                        )
-                    )
-                if determined_var[0] in gd.target_variables:
-                    determined_target_variables[determined_var[0]] = 1
-                output_buffer += (
-                    "%s in implication relation [%s] are known: %s ===> %s\n"
-                    % (lhs, ", ".join(rel[0:-1]) + " => " + rel[-1], lhs, rhs)
-                )
-                used_implication_relations.append(rel)
-
+        for deduction in by_source_step.get(step, ()):
+            relation = deduction["relation"]
+            head = deduction["head"]
+            lhs = ", ".join(deduction["premises"])
+            per_variable = variables_deductor_relations[head]
+            per_variable["number_of_deductions"] = deduction["count"]
+            if deduction["relation_kind"] == "symmetric":
+                description = ", ".join(relation)
+                used_symmetric_relations.append(relation)
+            else:
+                description = ", ".join(relation[:-1]) + " => " + relation[-1]
+                used_implication_relations.append(relation)
+            per_variable["deductor_relations"].append(description)
+            output_buffer += "%s in %s relation [%s] are known: %s ===> %s\n" % (
+                lhs, deduction["relation_kind"], description, lhs, head)
         output_buffer += separator_line
-        step += 1
 
     for rel in gd.symmetric_relations:
         if rel not in used_symmetric_relations:
@@ -235,3 +179,13 @@ def parse_solver_solution(gd):
 
     atomic_write(gd.output_dir, output_buffer)
     gd._report_written = gd.output_dir
+    from core.graphreport import attach_graph
+    attach_graph(gd.__dict__, validated, dict(
+        inputfile=gd.inputfile_name, outputfile=gd.output_dir, maxsteps=gd.max_steps,
+        drawgraph=getattr(gd, "draw_graph", False), tikz=getattr(gd, "tikz", 0),
+        dglayout=getattr(gd, "dglayout", "dot"),
+        graph_scope=getattr(gd, "graph_scope", "targets"),
+        graph_view=getattr(gd, "graph_view", "original")),
+        solutions=gd.solutions, original_graph=flow_graph)
+    for key in ("graph_files", "graph_summary", "graph_warnings"):
+        setattr(gd, "_" + key, validated.get(key))

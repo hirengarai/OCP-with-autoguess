@@ -27,10 +27,10 @@ import string
 import random
 from collections import namedtuple
 import subprocess
+from core.console import progress
 from config import TEMP_DIR
 import pathlib
 import time
-from datetime import datetime
 
 
 def ordered_set(seq):
@@ -59,7 +59,7 @@ def read_relation_file(path, preprocess=1, D=2, log=0, extra_known=None):
             with open(path, "r") as fileobj:
                 contents = fileobj.read()
     except (TypeError, ValueError):
-        print(f"File at {path} could not be read or is empty.")
+        progress(f"File at {path} could not be read or is empty.")
 
     if contents is None:
         raise ValueError(f"File at {path} could not be read or is empty.")
@@ -80,14 +80,14 @@ def read_relation_file(path, preprocess=1, D=2, log=0, extra_known=None):
         with open(algebraic_equations_file, "w") as equations_file:
             equations_file.write(algebraic_relations)
         starting_time = time.time()
-        print("-" * 60)
-        print("PREPROCESSING (Macaulay matrix)")
-        print("-" * 60)
+        progress("-" * 60)
+        progress("PREPROCESSING (Macaulay matrix)")
+        progress("-" * 60)
         macaulay_basis_file = os.path.join(
             TEMP_DIR, "macaulay_basis_%s.txt" % rnd_string_tmp
         )
         _macaulay_path = str(pathlib.Path(__file__).parent / "macaulay.py")
-        subprocess.run(
+        completed = subprocess.run(
             [
                 sys.executable,
                 _macaulay_path,
@@ -100,10 +100,12 @@ def read_relation_file(path, preprocess=1, D=2, log=0, extra_known=None):
                 "-D",
                 str(D),
             ],
-            check=True,
+            check=True, stdout=subprocess.PIPE, text=True,
         )
+        if completed.stdout:
+            progress(completed.stdout, end="")
         elapsed_time = time.time() - starting_time
-        print("Preprocessing finished in %0.4f seconds" % elapsed_time)
+        progress("Preprocessing finished in %0.4f seconds" % elapsed_time)
         try:
             with open(macaulay_basis_file, "r") as groebner_basis_file:
                 groebner_basis = groebner_basis_file.read()

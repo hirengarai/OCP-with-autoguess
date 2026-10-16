@@ -266,7 +266,9 @@ def test_reducebasis_cli_routes_to_implemented_handler(tmp_path):
                                 "--reducebasis", "-kn", "b", "--nograph"],
                                cwd=tmp_path, capture_output=True, text=True, timeout=10)
     assert completed.returncode == 0, completed.stderr
-    assert "Reduced basis size:    0" in completed.stdout
+    assert "STATUS: SAT" in completed.stdout
+    assert "Guess cost: 0" in completed.stdout
+    assert "Guessed variables: (none)" in completed.stdout
 
 
 @pytest.mark.parametrize("backend", ["mark", "elim"])

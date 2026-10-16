@@ -21,15 +21,14 @@ In case you use this tool please include the above copyright informations (name,
 """
 
 from core.parsesolution import parse_solver_solution
-from gurobipy import *
+from gurobipy import Env, GRB, read
 from core.inputparser import read_relation_file
 import os
 import math
 import time
 import random
-from core.parsesolution import parse_solver_solution
-from core.graphdrawer import draw_graph
 from config import TEMP_DIR
+from core.console import progress, progress_enabled
 from core.varnames import step_var, path_var
 
 
@@ -67,6 +66,10 @@ class ReduceGDtoMILP:
         log=0,
         threads=0,
         extra_known=None,
+        prepared_data=None,
+        graph_scope="targets",
+        graph_view="original",
+        defer_reporting=False,
     ):
         self.inputfile_name = inputfile_name
         self.rnd_string_tmp = "%030x" % random.randrange(16**30)
@@ -76,11 +79,14 @@ class ReduceGDtoMILP:
         self.direction = direction
         self.dglayout = dglayout
         self.draw_graph = drawgraph
+        self.graph_scope = graph_scope
+        self.graph_view = graph_view
+        self.defer_reporting = defer_reporting
         self.log = log
         self.threads = threads
         ###############################
         # Read and parse the input file
-        parsed_data = read_relation_file(
+        parsed_data = prepared_data if prepared_data is not None else read_relation_file(
             self.inputfile_name, preprocess, D, extra_known=extra_known
         )
         self.problem_name = parsed_data["problem_name"]
@@ -99,7 +105,7 @@ class ReduceGDtoMILP:
         ###############################
         if self.max_guess is None:
             self.max_guess = len(self.target_variables)
-            print(
+            progress(
                 "The number of guessed variables is set to be at most %d"
                 % self.max_guess
             )
@@ -323,7 +329,7 @@ class ReduceGDtoMILP:
         This method makes the MILP model, and then write it into an LP file
         """
 
-        print("Generating the MILP model ...")
+        progress("Generating the MILP model ...")
         start_time = time.time()
         lp_str = self.generate_objective_function()
         lp_str += self.generate_initial_conditions()
@@ -335,120 +341,16 @@ class ReduceGDtoMILP:
         with open(lp_file_path, "w") as lpfile:
             lpfile.write(lp_str)
         if self.log == 1:
-            print(
+            progress(
                 "MILP model was generated, and written into %s after %0.2f seconds"
                 % (lp_file_path, elapsed_time)
             )
         else:
-            print("MILP model was generated after %0.2f seconds" % elapsed_time)
+            progress("MILP model was generated after %0.2f seconds" % elapsed_time)
 
     def parse_and_write_solution(self):
-        """
-        This method parses the obtained soltuion (If MILP model is feasible),
-        and derives the determination flow such that user can simply find
-        how the target variables are determined
-        """
-
-        self.vertices = []
-        self.edges = []
-
-        separator_line = "".join(["#"] * 60)
-        output_buffer = ""
-        output_buffer += "Number of relations: %d\n" % self.num_of_relations
-        output_buffer += "Number of variables: %d\n" % self.num_of_vars
-        output_buffer += "Number of target variables: %d\n" % len(self.target_variables)
-        output_buffer += "Number of known variables: %d\n" % len(self.known_variables)
-        output_buffer += "Number of guessed variables: %d\n" % len(self.guessed_vars)
-        output_buffer += "Number of state copies (max_steps): %d\n" % self.max_steps
-        output_buffer += (
-            "An upper bound for the number of guessed variables given by user (max_guess): %d\n"
-            % self.max_guess
-        )
-        output_buffer += (
-            "%d out of %d state variables are known after %d state copies\n"
-            % (self.final_info, self.num_of_vars, self.max_steps)
-        )
-        output_buffer += separator_line
-        output_buffer += "\nThe following %d variable(s) are guessed:\n%s\n" % (
-            len(self.guessed_vars),
-            ", ".join(self.guessed_vars),
-        )
-        output_buffer += separator_line
-        output_buffer += "\nThe following %d variable(s) are initially known:\n%s\n" % (
-            len(self.known_variables),
-            ", ".join(self.known_variables),
-        )
-        output_buffer += separator_line
-        output_buffer += "\nTarget variables:\n%s\n" % ", ".join(self.target_variables)
-
-        output_buffer += separator_line
-        output_buffer += "\nDetermination flow:\n"
-        step = 0
-        determined_target_variables = dict(
-            zip(self.target_variables, [0] * (len(self.target_variables)))
-        )
-        for v in self.known_variables + self.guessed_vars:
-            determined_target_variables[v] = 1
-        while step < self.max_steps + 1 and not (
-            all(determined_target_variables.values())
-        ):
-            sub_title = "\nState %d:\n" % step
-            output_buffer += sub_title
-            for rel in self.symmetric_relations:
-                rel_known_vars = [
-                    v for v in rel if self.solutions[step][step_var(v, step)] == 1
-                ]
-                rel_str = ", ".join(rel)
-                if len(rel_known_vars) == (len(rel) - 1):
-                    determined_var = list(set(rel) - set(rel_known_vars))
-                    lhs = ", ".join(rel_known_vars)
-                    rhs = ", ".join(determined_var)
-                    self.vertices.append(rhs)
-                    for vr in rel_known_vars:
-                        self.vertices.append(vr)
-                        self.edges.append((vr, rhs))
-                    if determined_var[0] in self.target_variables:
-                        determined_target_variables[determined_var[0]] = 1
-                    output = (
-                        "%s in symmetric relation [%s] are known: %s ===> %s"
-                        % (lhs, rel_str, lhs, rhs)
-                        + "\n"
-                    )
-                    output_buffer += output
-            for rel in self.implication_relations:
-                rel_known_vars = [
-                    v for v in rel if self.solutions[step][step_var(v, step)] == 1
-                ]
-                rel_str = ", ".join(rel)
-                if rel_known_vars == rel[0:-1]:
-                    determined_var = [rel[-1]]
-                    lhs = ", ".join(rel_known_vars)
-                    rhs = ", ".join(determined_var)
-                    self.vertices.append(rhs)
-                    for vr in rel_known_vars:
-                        self.vertices.append(vr)
-                        self.edges.append((vr, rhs))
-                    if determined_var[0] in self.target_variables:
-                        determined_target_variables[determined_var[0]] = 1
-                    output = (
-                        "%s in implication relation [%s] are known: %s ===> %s"
-                        % (lhs, rel_str, lhs, rhs)
-                        + "\n"
-                    )
-                    output_buffer += output
-            output_buffer += separator_line
-            step += 1
-        self.finally_known = [
-            v
-            for v in self.variables
-            if self.solutions[self.max_steps][step_var(v, self.max_steps)] == 1
-        ]
-        output_buffer += (
-            "\nThe following variables are known in final state:\n%s"
-            % ", ".join(self.finally_known)
-        )
-        with open(self.output_dir, "w") as outputfile_obj:
-            outputfile_obj.write(output_buffer)
+        """Compatibility entry point for the shared validated report writer."""
+        return parse_solver_solution(self)
 
     def solve_model(self):
         """
@@ -461,7 +363,8 @@ class ReduceGDtoMILP:
         if self.time_limit < 0 and self.time_limit != -1:
             raise ValueError("Time limit must be nonnegative or -1")
         lpfile_path = os.path.join(TEMP_DIR, self.lpfile_name)
-        self.milp_model = read(lpfile_path)
+        self._gurobi_env = Env(params={"OutputFlag": int(progress_enabled())})
+        self.milp_model = read(lpfile_path, env=self._gurobi_env)
         if self.log == 0:
             os.remove(lpfile_path)
         if self.time_limit != -1:
@@ -477,7 +380,7 @@ class ReduceGDtoMILP:
         # 2 (proving optimality is in priority)
         # 3 (focus on the best bound)
         self.milp_model.params.Threads = self.threads  # 0 = use all available cores
-        self.milp_model.params.OutputFlag = 1  # 1 (default value)
+        self.milp_model.params.OutputFlag = int(progress_enabled())
 
         start_time = time.time()
         ##########################
@@ -513,7 +416,7 @@ class ReduceGDtoMILP:
         ##########################
         ##########################
         elapsed_time = time.time() - start_time
-        print("Solving process was finished after %0.2f seconds" % elapsed_time)
+        progress("Solving process was finished after %0.2f seconds" % elapsed_time)
 
         if self.milp_model.SolCount > 0:
             # SolCount, rather than a small allowlist of stopping statuses,
@@ -537,20 +440,10 @@ class ReduceGDtoMILP:
                 )
                 self.milp_model.write(grb_solution_file_path)
             parse_solver_solution(self)
-            if self.draw_graph:
-                draw_graph(
-                    self.vertices,
-                    self.edges,
-                    self.known_variables,
-                    self.guessed_vars,
-                    self.output_dir,
-                    self.tikz,
-                    self.dglayout,
-                )
             return True
         elif self.milp_model.Status == GRB.INFEASIBLE:
-            print("The obtained milp model is infeasible")
+            progress("The obtained milp model is infeasible")
             return False
         else:
-            print("No solution found (stopping reason: %s)." % self.termination_reason)
+            progress("No solution found (stopping reason: %s)." % self.termination_reason)
             return None

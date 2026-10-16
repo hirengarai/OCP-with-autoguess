@@ -22,6 +22,7 @@ In case you use this tool please include the above copyright informations (name,
 
 import time
 
+from core.console import progress, progress_output
 from core.solverresult import (
     current_result, basis_result, solve_sat, remaining_time, timed_search,
     termination_result, get_time_limit,
@@ -55,6 +56,10 @@ def _common(parameters):
         D=parameters.get("D", 2), dglayout=parameters.get("dglayout", "dot"),
         drawgraph=parameters.get("drawgraph", True), log=parameters.get("log", 0),
         extra_known=_parse_extra_known(parameters),
+        prepared_data=parameters.get("_prepared_model"),
+        graph_scope=parameters.get("graph_scope", "targets"),
+        graph_view=parameters.get("graph_view", "original"),
+        defer_reporting=parameters.get("_defer_reporting", False),
     )
 
 
@@ -78,15 +83,11 @@ def _extract_sat_model(solver, model):
 
 def _save_sat_solution(solver, model):
     from core.parsesolution import parse_solver_solution
-    from core.graphdrawer import draw_graph
     _extract_sat_model(solver, model)
     parse_solver_solution(solver)
-    if solver.draw_graph:
-        draw_graph(solver.vertices, solver.edges, solver.known_variables, solver.guessed_vars,
-                   solver.output_dir, solver.tikz, solver.dglayout)
 
 
-def _findmin_sat_incremental(parameters, start_mg, _w=None):
+def _findmin_sat_incremental(parameters, start_mg):
     """Minimize count or weight, preserving the best model and proof status.
 
     The time limit covers the complete descent. A timeout after a feasible
@@ -141,7 +142,8 @@ def _findmin_sat_incremental(parameters, start_mg, _w=None):
             best_cost = sum(weight for literal, weight in zip(literals, weights or [1] * len(literals))
                             if literal in positive)
             best_model = model
-            print("  max_guess = %d: SAT (cost %d)" % (bound, best_cost))
+            if not parameters.get("_defer_reporting", False):
+                progress("  max_guess = %d: SAT (cost %d)" % (bound, best_cost))
             if best_cost == 0:
                 proven = True
                 stop_reason = "optimal"
@@ -158,7 +160,8 @@ def _findmin_sat_incremental(parameters, start_mg, _w=None):
     _save_sat_solution(solver, best_model)
     result = current_result(solver, True, optimal=proven)
     result["optimization_time"] = time.monotonic() - started
-    print("FIND-MIN RESULT: %s cost = %d" % ("minimum" if proven else "best found", best_cost))
+    if not parameters.get("_defer_reporting", False):
+        progress("FIND-MIN RESULT: %s cost = %d" % ("minimum" if proven else "best found", best_cost))
     return result
 
 
@@ -167,19 +170,34 @@ def _findmin_descent(parameters, solver_type):
         return _findmin_sat_incremental(parameters, parameters["maxguess"])
     bound = parameters["maxguess"]
     best = None
+    best_solver = None
     while bound >= 0:
-        iteration = dict(parameters, maxguess=bound, findmin=False)
-        result = search_using_smt(iteration)
+        iteration = dict(parameters, maxguess=bound, findmin=False, _defer_reporting=True)
+        progress("Cost-bound subsearch: maximum guess cost %d" % bound)
+        with progress_output(False):
+            result, solver = _solve_smt(iteration)
         if result["status"] != "sat":
             if best is not None:
                 best["optimal"] = result["status"] == "unsat"
-                return termination_result(best, result["termination_reason"])
+                termination_result(best, result["termination_reason"])
+                break
             return result
         best = result
+        best_solver = solver
         if result["cost"] == 0:
             best["optimal"] = True
-            return termination_result(best)
+            termination_result(best)
+            break
         bound = result["cost"] - 1
+    if best is not None and not parameters.get("_defer_reporting", False):
+        # Each descent iteration only solves and validates. Its native state
+        # dictionaries remain available after the SMT resource is closed, so
+        # the chosen final basis can retain the original graph's native trace.
+        from core.parsesolution import parse_solver_solution
+        best_solver.defer_reporting = False
+        best_solver.termination_reason = best["termination_reason"]
+        parse_solver_solution(best_solver)
+        best = current_result(best_solver, True, optimal=best["optimal"])
     return best
 
 
@@ -195,16 +213,25 @@ def search_using_sat(parameters):
 
 @timed_search
 def search_using_smt(parameters):
-    from core.gdsmt import ReduceGDtoSMT
     if parameters.get("findmin", False):
         return _findmin_descent(parameters, "smt")
+    result, _ = _solve_smt(parameters)
+    return result
+
+
+def _solve_smt(parameters):
+    """Run one SMT query and retain its plain state data for final reporting."""
+    from core.gdsmt import ReduceGDtoSMT
     solver = ReduceGDtoSMT(**_common(parameters), smt_solver_name=parameters.get("smtsolver", "z3"))
     try:
         solver.make_model()
         solver.time_limit = remaining_time(parameters)
-        return current_result(solver, solver.solve_via_smtsolver())
+        result = current_result(solver, solver.solve_via_smtsolver())
+        return result, solver
     finally:
-        solver.smt_solver.exit()
+        native_solver = getattr(solver, "smt_solver", None)
+        if native_solver is not None:
+            native_solver.exit()
 
 
 @timed_search
@@ -229,8 +256,13 @@ def search_using_milp(parameters):
         outcome = solver.solve_model()
         return current_result(solver, outcome, optimal=getattr(solver, "optimal", False))
     finally:
-        if hasattr(solver, "milp_model"):
-            solver.milp_model.dispose()
+        try:
+            if hasattr(solver, "milp_model"):
+                solver.milp_model.dispose()
+        finally:
+            native_environment = getattr(solver, "_gurobi_env", None)
+            if native_environment is not None:
+                native_environment.dispose()
 
 
 def search_using_groebnerbasis(parameters):
@@ -240,16 +272,20 @@ def search_using_groebnerbasis(parameters):
 def _heuristic_search(parameters, name):
     if get_time_limit(parameters) != -1:
         raise ValueError("%s cannot enforce time limits; use SAT, CP, MILP or SMT/Z3" % name)
-    import copy
+    from core.inputparser import read_relation_file
     if name == "mark":
         from core.gdmark import Mark as Solver
     else:
         from core.gdelim import Elim as Solver
+    data = parameters.get("_prepared_model")
+    if data is None:
+        data = read_relation_file(parameters["inputfile"], preprocess=parameters.get("preprocess", 0),
+                                 D=parameters.get("D", 2), log=parameters.get("log", 0),
+                                 extra_known=_parse_extra_known(parameters))
     solver = Solver(inputfile_name=parameters["inputfile"], outputfile_name=parameters["outputfile"],
                     tikz=parameters.get("tikz", 0), preprocess=parameters.get("preprocess", 0),
                     D=parameters.get("D", 2), log=parameters.get("log", 0),
-                    extra_known=_parse_extra_known(parameters))
-    data = copy.deepcopy(solver.__dict__)
+                    extra_known=_parse_extra_known(parameters), prepared_data=data)
     solver.find_minimal_guess_basis()
     guesses = [v for v in solver.guess_basis if v not in data["known_variables"]]
     # Heuristics do not implement forbidden guesses or a hard budget. Validate
@@ -259,7 +295,9 @@ def _heuristic_search(parameters, name):
     if (set(guesses) & set(data["notguessed_variables"]) or
             cost > parameters["maxguess"]):
         return current_result(solver, None)
-    return basis_result(data, guesses, max_steps=parameters["maxsteps"])
+    from core.graphreport import attach_graph
+    result = basis_result(data, guesses, max_steps=parameters["maxsteps"])
+    return attach_graph(data, result, parameters)
 
 
 @timed_search
@@ -280,9 +318,11 @@ def search_using_propagate(parameters):
     from core.propagate import reduce_basis
     extra_known = _parse_extra_known(parameters)
     # Keep fixed file-known variables distinct from the guess basis.
-    data = read_relation_file(parameters["inputfile"], preprocess=parameters.get("preprocess", 0),
-                              D=parameters.get("D", 2), log=parameters.get("log", 0),
-                              extra_known=None if parameters.get("reducebasis", False) else extra_known)
+    data = parameters.get("_prepared_model")
+    if data is None:
+        data = read_relation_file(parameters["inputfile"], preprocess=parameters.get("preprocess", 0),
+                                 D=parameters.get("D", 2), log=parameters.get("log", 0),
+                                 extra_known=None if parameters.get("reducebasis", False) else extra_known)
     if parameters.get("reducebasis", False):
         if extra_known is None:
             raise ValueError("--reducebasis requires --known with the initial guess basis")
@@ -295,8 +335,10 @@ def search_using_propagate(parameters):
         result = basis_result(data, reduced, max_steps=parameters.get("maxsteps"))
         result["reduced_basis"] = reduced
         result["optimal_subset"] = True
-        return result
-    return basis_result(data, [], max_steps=parameters.get("maxsteps"))
+    else:
+        result = basis_result(data, [], max_steps=parameters.get("maxsteps"))
+    from core.graphreport import attach_graph
+    return attach_graph(data, result, parameters)
 
 
 @timed_search

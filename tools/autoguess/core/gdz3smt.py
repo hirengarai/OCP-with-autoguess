@@ -27,11 +27,10 @@ from pysat import solvers
 from pysat import formula
 import random
 from .inputparser import read_relation_file
-from threading import Timer
 import z3
 from core.parsesolution import parse_solver_solution
-from core.graphdrawer import draw_graph
 from config import TEMP_DIR
+from core.console import progress
 from core.varnames import step_var, path_var
 from core.solverresult import solve_sat
 
@@ -66,6 +65,9 @@ class ReduceGDtoZ3SMT:
         drawgraph=True,
         log=0,
         extra_known=None,
+        graph_scope="targets",
+        graph_view="original",
+        defer_reporting=False,
     ):
         self.inputfile_name = inputfile_name
         self.output_dir = outputfile_name
@@ -78,6 +80,9 @@ class ReduceGDtoZ3SMT:
             raise ValueError("Unsupported SAT solver: %s" % self.sat_solver_name)
         self.dglayout = dglayout
         self.draw_graph = drawgraph
+        self.graph_scope = graph_scope
+        self.graph_view = graph_view
+        self.defer_reporting = defer_reporting
         self.log = log
         ###############################
         # Read and parse the input file
@@ -218,7 +223,7 @@ class ReduceGDtoZ3SMT:
         """
         This method makes the SMT model, and then write it into an smt file
         """
-        print("Generating the SMT model ...")
+        progress("Generating the SMT model ...")
         start_time = time.time()
         self.generate_initial_conditions()
         self.generate_smt_constraints()
@@ -231,12 +236,12 @@ class ReduceGDtoZ3SMT:
         if self.log == 1:
             with open(file_path, "w") as outputfile:
                 outputfile.write(smt2_model)
-            print(
+            progress(
                 "SMT model was generated after %0.2f seconds and was written into %s"
                 % (elapsed_time, file_path)
             )
         else:
-            print("SMT model was generated after %0.2f seconds" % elapsed_time)
+            progress("SMT model was generated after %0.2f seconds" % elapsed_time)
 
     def convert_smt_to_cnf(self):
         """
@@ -255,7 +260,7 @@ class ReduceGDtoZ3SMT:
         cnf_format = z3.Then("simplify", "card2bv", "tseitin-cnf")
         # cnf_format = z3.Then("card2bv", "tseitin-cnf")
         # cnf_format = z3.Tactic("card2bv")
-        print("Converting the SMT problem to CNF in dimacs format ...")
+        progress("Converting the SMT problem to CNF in dimacs format ...")
         start_time = time.time()
         temp = cnf_format(G)
         """
@@ -283,12 +288,12 @@ class ReduceGDtoZ3SMT:
             outputfile.write(dimacs_format)
         elapsed_time = time.time() - start_time
         if self.log == 1:
-            print(
+            progress(
                 "SMT was converted to the CNF after %0.2f seconds and was written into %s"
                 % (elapsed_time, self.cnf_file_path)
             )
         else:
-            print("SMT was converted to the CNF after %0.2f seconds" % elapsed_time)
+            progress("SMT was converted to the CNF after %0.2f seconds" % elapsed_time)
 
     def interrupt(self, s):
         s.interrupt()
@@ -306,7 +311,7 @@ class ReduceGDtoZ3SMT:
         cnf_formula = formula.CNF(self.cnf_file_path)
         sat_solver = solvers.Solver(name=self.sat_solver_name)
         sat_solver.append_formula(cnf_formula)
-        print("\nSolving via a SAT solver ...")
+        progress("\nSolving via a SAT solver ...")
         start_time = time.time()
         try:
             result = solve_sat(sat_solver, self.sat_solver_name, self.time_limit)
@@ -317,7 +322,7 @@ class ReduceGDtoZ3SMT:
         finally:
             sat_solver.delete()
         elapsed_time = time.time() - start_time
-        print("Time used by SAT solver: %0.2f seconds" % elapsed_time)
+        progress("Time used by SAT solver: %0.2f seconds" % elapsed_time)
         if result == True:
             self.termination_reason = "solution_found"
             positive = set(v for v in self.satsolver_solution if v > 0)
@@ -334,24 +339,14 @@ class ReduceGDtoZ3SMT:
                 )
                 self.solutions[step] = dict(zip(state_vars, state_values))
             parse_solver_solution(self)
-            if self.draw_graph:
-                draw_graph(
-                    self.vertices,
-                    self.edges,
-                    self.known_variables,
-                    self.guessed_vars,
-                    self.output_dir,
-                    self.tikz,
-                    self.dglayout,
-                )
         elif result == False:
             self.termination_reason = "infeasible"
-            print("The problem is UNSAT!\n")
+            progress("The problem is UNSAT!\n")
         else:
             if self.termination_reason != "interrupted":
                 self.timed_out = self.time_limit != -1
                 self.termination_reason = "time_limit" if self.timed_out else "unknown"
-            print("The solver stopped before finding any solution (%s)." % self.termination_reason)
+            progress("The solver stopped before finding any solution (%s)." % self.termination_reason)
         if self.log == 0:
             os.remove(self.cnf_file_path)
         return result
@@ -377,7 +372,7 @@ class ReduceGDtoZ3SMT:
         # z3.set_param(memory_max_size=8192)
         # self.solver.set("sat.cardinality.solver", True)
         z3.set_param("parallel.enable", True)
-        print(
+        progress(
             "Checking the satisfiablity of the obtained SMT model using z3-solver ..."
         )
         timeout = 0 if self.time_limit == -1 else max(1, ceil(self.time_limit * 1000))
@@ -393,10 +388,10 @@ class ReduceGDtoZ3SMT:
         ##########################
         ##########################
         elapsed_time = time.time() - start_time
-        print("Checking was finished after %0.2f seconds" % elapsed_time)
+        progress("Checking was finished after %0.2f seconds" % elapsed_time)
 
         solver_statistics = self.solver.statistics()
-        # print(solver_statistics)
+        # progress(solver_statistics)
         if result == z3.sat:
             self.termination_reason = "solution_found"
             # self.solution = self.solver.model()
@@ -419,19 +414,9 @@ class ReduceGDtoZ3SMT:
                 )
                 self.solutions[step] = dict(zip(state_vars, state_values))
             parse_solver_solution(self)
-            if self.draw_graph:
-                draw_graph(
-                    self.vertices,
-                    self.edges,
-                    self.known_variables,
-                    self.guessed_vars,
-                    self.output_dir,
-                    self.tikz,
-                    self.dglayout,
-                )
         elif result == z3.unsat:
             self.termination_reason = "infeasible"
-            print(
+            progress(
                 "The model is UNSAT!\nIncrease the max_guess, and max_steps paramters, and try again."
             )
         elif result == z3.unknown:
@@ -441,5 +426,5 @@ class ReduceGDtoZ3SMT:
                 self.termination_reason = "time_limit"
             elif "interrupt" in reason or "cancel" in reason:
                 self.termination_reason = "interrupted"
-            print("The solver stopped before finding any solution (%s)." % self.termination_reason)
+            progress("The solver stopped before finding any solution (%s)." % self.termination_reason)
         return True if result == z3.sat else False if result == z3.unsat else None
